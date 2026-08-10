@@ -1,0 +1,17 @@
+# Виртуал орчин — requirements.txt-ээс дахин үүсгэнэ
+.venv/
+
+# Python-ы завсрын файлууд
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Зөвхөн энэ компьютерт хамаарах тохиргоо
+.claude/settings.local.json
+
+# Засварлагчийн түр файлууд
+.vscode/
+.idea/
+*.swp
