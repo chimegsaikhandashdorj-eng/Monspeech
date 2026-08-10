@@ -75,11 +75,43 @@ Google Web Speech-ийн Chromium ашигладаг эндпойнт рүү т�
 
 ## Суулгах
 
+### Энгийн хэрэглэгчид — `Monspeech.exe`
+
+`Monspeech.exe` файлыг татаад давхар товш. Python, суулгац, бүртгэл юу ч
+шаардахгүй — ганц файл, 18 МБ.
+
+Анх ажиллуулахад тохиолдож болох зүйлс:
+
+| Юу гарч ирэх | Яах вэ |
+|---|---|
+| **Windows protected your PC** (SmartScreen) | Гарын үсэг зурагдаагүй шинэ програм бүрт гардаг. **More info → Run anyway** |
+| **Микрофон ашиглах зөвшөөрөл** | Зөвшөөрнө. Эс бөгөөс дуу сонсогдохгүй |
+| Антивирус сэжиглэх | PyInstaller-ээр багцалсан програмд түгээмэл хуурамч дохио. Итгэмжлэгдсэн жагсаалтад нэмнэ |
+
+Компьютер асахад автоматаар ажиллуулах бол `Monspeech.exe`-ийн товчлолыг
+`shell:startup` хавтсанд хийнэ (Win+R → `shell:startup`).
+
+**Устгах:** `Monspeech.exe`-г устга. Тохиргоо, түүхийг нь бүрэн арилгах бол
+`%AppData%\Monspeech` хавтсыг устга.
+
+### Хөгжүүлэгчид — эх кодоос
+
 ```bash
 python -m venv .venv && .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Шаардлага: Windows, Python 3.11+, микрофон, интернэт холболт.
+
+### `.exe`-г өөрөө бүтээх
+
+```bash
+powershell -NoProfile -File tools\build_exe.ps1
+```
+
+Үр дүн: `dist\Monspeech.exe`. Скрипт нь PyInstaller-ийг (`requirements-dev.txt`)
+шаардлагатай үед өөрөө суулгана. Тохиргоо нь [tools/monspeech.spec](tools/monspeech.spec)
+дотор — дүрсийг багцын дотор ижил замаар байрлуулж, pystray/pynput-ийн Windows
+хэрэгжүүлэлтийг гараар зааж өгсөн (багцлагч өөрөө олдоггүй).
 
 ## Ажиллуулах
 
@@ -194,6 +226,7 @@ tray, товчлуур солих, микрофон сонгох.
 | [monspeech/logging_setup.py](monspeech/logging_setup.py) | Файл руу бичих лог |
 | [tools/make_icon.py](tools/make_icon.py) | Логог зурж `.ico`/`.png` болгох |
 | [tools/create_shortcut.ps1](tools/create_shortcut.ps1) | Ажлын ширээний товчлол үүсгэх |
+| [tools/build_exe.ps1](tools/build_exe.ps1) | Бие даасан `Monspeech.exe` бүтээх |
 
 ## Асуудал гарвал
 

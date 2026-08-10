@@ -1,0 +1,3 @@
+# Зөвхөн .exe бүтээхэд хэрэгтэй. Аппыг ажиллуулахад шаардлагагүй.
+# Суулгах:  .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+pyinstaller>=6.0

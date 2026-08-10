@@ -5,6 +5,8 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# PyInstaller-ийн бүтээлт (tools\build_exe.ps1-ээр дахин үүсгэнэ)
 build/
 dist/
 

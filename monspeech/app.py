@@ -31,7 +31,7 @@ from .store import TranscriptStore, UsageStats
 from .textproc import Formatter, learn_corrections, parse_replacements
 from .tray import Tray
 from .window import CODE_TO_NAME, ControlWindow
-from .winfocus import TargetWindow
+from .winfocus import TargetWindow, activate
 
 log = get_logger("app")
 
@@ -554,8 +554,14 @@ class MonspeechApp:
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
-        except tk.TclError:  # цонх хаагдаж байх агшин таарч болно
-            pass
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+        except (tk.TclError, OSError):  # цонх хаагдаж байх агшин таарч болно
+            return
+        # Ажлын ширээний дүрсээс ирсэн дохиогоор нээж байгаа бол дуудсан процесс
+        # фокус өгөх эрхгүй байж болно (.exe хувилбарт ачаалагч нь өөрийгөө хүү
+        # процесс болгон ажиллуулдаг тул эрх нь дамждаггүй). Иймд цонхоо өөрөө
+        # урд нь гаргана — текст буулгахад ашигладаг тэр л аргачлал.
+        activate(hwnd)
 
     def on_close(self) -> None:
         # Дүрс үнэхээр цагны хажууд байгаа эсэхийг шалгана — зөвхөн тохиргоог

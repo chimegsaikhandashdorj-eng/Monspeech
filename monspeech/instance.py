@@ -60,6 +60,10 @@ def request_show() -> bool:
             # Windows зөвхөн урд байгаа процесст фокус авахыг зөвшөөрдөг —
             # тэр эрхээ ажиллаж байгаа хуулбартаа шилжүүлнэ
             ctypes.windll.user32.AllowSetForegroundWindow(ASFW_ANY)
+            # Дохио өгөөд шууд гарна: энд саатвал бидний гарах агшинд Windows
+            # фокусыг биднийг эхлүүлсэн цонх руу буцаадаг тул эсрэг үр дүнтэй.
+            # Цонхоо урд нь гаргах ажлыг ажиллаж байгаа апп `winfocus.activate`
+            # -аар өөрөө хийнэ.
             return bool(dll.SetEvent(handle))
         finally:
             dll.CloseHandle(handle)
