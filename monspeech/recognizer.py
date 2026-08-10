@@ -9,7 +9,12 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+import time
 import urllib.parse
+
+from .logging_setup import get as get_logger
+
+log = get_logger("recognizer")
 
 HOST = "www.google.com"
 PATH = "/speech-api/v2/recognize"
@@ -17,6 +22,12 @@ PATH = "/speech-api/v2/recognize"
 DEFAULT_KEY = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
 
 TIMEOUT = 15.0
+
+# Түр зуурын гэж үзэх хариунууд: ачаалал ихдэх, сервер талын түр саатал.
+# 403 нь энд байхгүй — түлхүүр татгалзсан бол дахин оролдох нь утгагүй.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Оролдлого хоорондын хүлээлт. Нийт нэмэгдэх саатал 1.4 секундээс хэтрэхгүй.
+RETRY_DELAYS = (0.4, 1.0)
 
 
 class RecognitionError(Exception):
@@ -102,20 +113,16 @@ class Recognizer:
 
         `(текст, итгэлцэл)` хосыг буцаана. Юу ч танигдаагүй бол `("", 0.0)`.
         Итгэлцлийг үйлчилгээ өгөөгүй бол 1.0 гэж үзнэ.
+
+        Үйлчилгээ түр ачаалагдсан (429) эсвэл сервер талын түр алдаа (5xx) гарвал
+        богино хүлээлттэйгээр дахин оролдоно — эс бөгөөс хэрэглэгчийн хэлсэн
+        өгүүлбэр бүрмөсөн алдагдаж, дахин ярихаас өөр арга үлдэхгүй.
         """
         if not pcm:
             return "", 0.0
         language = lang or self.lang
         with self._lock:
-            try:
-                status, body = self._post(pcm, rate, True, language)
-            except (OSError, http.client.HTTPException):
-                # Хадгалсан холболт хуучирсан байж болно — нэг удаа дахин оролдоно
-                try:
-                    status, body = self._post(pcm, rate, False, language)
-                except (OSError, http.client.HTTPException) as exc:
-                    self._conn = None
-                    raise RecognitionError(f"Сүлжээний алдаа: {exc}") from exc
+            status, body = self._post_with_retries(pcm, rate, language)
 
         if status == 403:
             raise RecognitionError("Таних үйлчилгээ түлхүүрийг хүлээж авсангүй (403).")
@@ -125,6 +132,35 @@ class Recognizer:
             raise RecognitionError(f"Таних үйлчилгээ {status} хариу өглөө.")
 
         return self._parse(body.decode("utf-8", "replace"))
+
+    def _post_with_retries(self, pcm: bytes, rate: int, lang: str) -> tuple[int, bytes]:
+        """Түр зуурын алдаанд дахин оролдоно (түгжээ дотор дуудагдана).
+
+        Хүлээлтийг санаатай богино барьсан: ажлын thread нэг ээлжтэй тул энд
+        удвал араас нь ирсэн өгүүлбэрүүд цувж, саатал улам хуримтлагдана.
+        """
+        attempts = len(RETRY_DELAYS) + 1
+        for attempt in range(attempts):
+            reuse = attempt == 0  # дахин оролдохдоо үргэлж шинэ холболтоор
+            try:
+                status, body = self._post(pcm, rate, reuse, lang)
+            except (OSError, http.client.HTTPException) as exc:
+                # Хадгалсан холболт хуучирсан байж болно — дахин оролдоно
+                self._conn = None
+                if attempt == attempts - 1:
+                    raise RecognitionError(f"Сүлжээний алдаа: {exc}") from exc
+                log.warning("сүлжээний алдаа (%d/%d): %s", attempt + 1, attempts, exc)
+                time.sleep(RETRY_DELAYS[attempt])
+                continue
+
+            if status not in RETRY_STATUSES or attempt == attempts - 1:
+                return status, body
+            log.warning(
+                "үйлчилгээ %d хариу өглөө (%d/%d) — дахин оролдож байна",
+                status, attempt + 1, attempts,
+            )
+            time.sleep(RETRY_DELAYS[attempt])
+        raise AssertionError("хүрэхгүй")  # давталт үргэлж буцаана эсвэл шиднэ
 
     @staticmethod
     def _parse(body: str) -> tuple[str, float]:

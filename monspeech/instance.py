@@ -49,11 +49,15 @@ def _kernel32():
     return dll
 
 
-def request_show() -> bool:
-    """Ажиллаж байгаа хуулбарт "цонхоо нээ" гэж хэлнэ."""
+def request_show(event_name: str = SHOW_EVENT_NAME) -> bool:
+    """Ажиллаж байгаа хуулбарт "цонхоо нээ" гэж хэлнэ.
+
+    `event_name`-ийг зөвхөн тест сольдог — ажиллаж байгаа апптай мөргөлдөхгүйгээр
+    шалгах боломж өгнө.
+    """
     try:
         dll = _kernel32()
-        handle = dll.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
+        handle = dll.OpenEventW(EVENT_MODIFY_STATE, False, event_name)
         if not handle:
             return False
         try:
@@ -78,8 +82,9 @@ class ShowListener:
     thread дохиог сонсоод аппын цонхыг нээх эвент илгээнэ.
     """
 
-    def __init__(self, on_signal) -> None:
+    def __init__(self, on_signal, event_name: str = SHOW_EVENT_NAME) -> None:
         self._on_signal = on_signal
+        self._event_name = event_name
         self._handle = None
         self._thread: threading.Thread | None = None
         self._running = False
@@ -87,7 +92,7 @@ class ShowListener:
     def start(self) -> None:
         try:
             dll = _kernel32()
-            self._handle = dll.CreateEventW(None, False, False, SHOW_EVENT_NAME)
+            self._handle = dll.CreateEventW(None, False, False, self._event_name)
         except OSError as exc:  # noqa: BLE001 - дохиогүй ч апп ажиллана
             log.error("цонх нээх дохио үүсгэгдсэнгүй: %s", exc)
             return

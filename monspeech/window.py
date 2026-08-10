@@ -11,7 +11,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from . import theme
+from . import __version__, theme
 from .hotkeys import pretty
 from .widgets import (
     Keycaps,
@@ -46,6 +46,11 @@ TYPING_TOGGLES = [
 APP_TOGGLES = [
     ("wave_overlay", "Долгион харуулах", "долгион заалт курсор overlay"),
     ("tray_enabled", "Хаахад tray руу нуух", "tray хаах"),
+    (
+        "start_with_windows",
+        "Windows-тай хамт эхлүүлэх",
+        "автомат эхлэх startup асахад компьютер нэвтрэх",
+    ),
 ]
 ADVANCED_TOGGLES = [
     ("ptt_enabled", "Push-to-talk горим", "push to talk дарж барих горим"),
@@ -80,6 +85,12 @@ TUNING_ROWS = [
         "Микрофон бэлэн барих",
         "микрофон бэлэн хурдан эхлэх",
         [("Болих", 0), ("15 сек", 15), ("45 сек", 45), ("2 минут", 120)],
+    ),
+    (
+        "max_recording_seconds",
+        "Бичлэгийн дээд хугацаа",
+        "бичлэг дээд хугацаа хязгаар аюулгүй гацах",
+        [("1 минут", 60), ("3 минут", 180), ("5 минут", 300), ("10 минут", 600)],
     ),
 ]
 
@@ -283,6 +294,26 @@ class ControlWindow:
         )
         self._register(section, row, "хэл language монгол english", fill="x", pady=4)
 
+        # Хоёрдогч товчлуураар (анхны утга Win+Shift) ярих хэл
+        row, holder = label_row(section.body, "Хоёр дахь хэл")
+        self.alt_lang_var = tk.StringVar(
+            value=CODE_TO_NAME.get(self.app.cfg["lang_alt"], LANGUAGES[1][0])
+        )
+        alt_box = ttk.Combobox(
+            holder, textvariable=self.alt_lang_var, values=[n for n, _ in LANGUAGES],
+            state="readonly", style="Mon.TCombobox",
+        )
+        alt_box.pack(fill="x")
+        alt_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self.app.on_alt_lang_changed(NAME_TO_CODE[self.alt_lang_var.get()]),
+        )
+        self._register(
+            section, row,
+            f"хоёр дахь хэл second language {pretty(self.app.cfg['ptt_key_alt'])}",
+            fill="x", pady=4,
+        )
+
         row, holder = label_row(section.body, "Микрофон")
         self.mic_names, self.mic_indexes = self.app.list_microphones()
         self.mic_var = tk.StringVar(value=self._current_mic_name())
@@ -468,6 +499,11 @@ class ControlWindow:
 
         right = tk.Frame(footer, bg=theme.BG)
         right.pack(side="right", padx=theme.PAD_X)
+        # Хувилбар — хэрэглэгч аль хувилбартайгаа мэдэхгүй байх нь тусламж
+        # хүсэхэд хамгийн түрүүнд гардаг асуулт
+        tk.Label(
+            right, text=f"v{__version__}", bg=theme.BG, fg=theme.DIM, font=theme.MONO
+        ).pack(side="right", padx=(10, 0))
         Link(right, "Лог", self.app.open_log, font=theme.MONO).pack(side="right")
         tk.Label(right, text="·", bg=theme.BG, fg=theme.DIM, font=theme.MONO).pack(
             side="right", padx=6

@@ -25,6 +25,9 @@ DEFAULTS: dict[str, Any] = {
     "voice_punctuation": True,
     "wave_overlay": True,
     "tray_enabled": True,
+    # Windows асахад автоматаар ажиллах. Үнэний эх сурвалж нь бүртгэл (autostart.py)
+    # — апп эхлэхдээ тэндээс уншиж энэ утгыг тааруулна.
+    "start_with_windows": False,
     "mic_index": -1,
     "replacements": {},
     # Дуут товчлол: "миний хаяг" → бүтэн хаяг

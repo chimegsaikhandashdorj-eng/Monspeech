@@ -56,6 +56,9 @@ class FakeApp:
     def remember_type_mode_app(self):
         return "«Notepad» цонхонд одооноос шууд бичнэ."
 
+    def on_alt_lang_changed(self, code):
+        self.cfg["lang_alt"] = code
+
 
 try:
     root = tk.Tk()
@@ -114,7 +117,30 @@ check(
 )
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 9)
+check("чагтын тоо", len(ui.toggles), 10)
+check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
+
+# --- Хоёр дахь хэлийг цонхноос сонгоно (өмнө нь зөвхөн config.json-оос) ---
+alt_row = next((r for r in ui.rows if "second language" in r["keywords"]), None)
+check("хоёр дахь хэлний мөр бүртгэгдсэн", alt_row is not None, True)
+check("одоогийн утгыг харуулсан", ui.alt_lang_var.get(), "English (US)")
+ui.alt_lang_var.set("Русский")
+ui.app.on_alt_lang_changed("ru-RU")
+check("тохиргоонд хадгалагдсан", app.cfg["lang_alt"], "ru-RU")
+
+# --- Бичлэгийн дээд хугацаа UI-тай болсон ---
+check("дээд хугацааны сонголт", "max_recording_seconds" in ui.tuning_boxes, True)
+
+# --- Хувилбар харагдана ---
+from monspeech import __version__  # noqa: E402
+
+found_version = any(
+    isinstance(child, tk.Label) and child.cget("text") == f"v{__version__}"
+    for frame in ui.root.winfo_children()
+    for sub in frame.winfo_children()
+    for child in sub.winfo_children()
+)
+check("хувилбарын шошго байна", found_version, True)
 
 root.destroy()
 

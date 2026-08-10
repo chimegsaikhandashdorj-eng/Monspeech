@@ -18,6 +18,7 @@ import threading
 import time
 import tkinter as tk
 
+from . import autostart
 from .audio import MIN_THRESHOLD, Recorder
 from .config import Config
 from .history import InsertionHistory
@@ -39,11 +40,18 @@ KEEPALIVE_SECONDS = 20  # урт яриан дунд холболт хуучра
 QUEUE_WARN = 2
 QUEUE_LIMIT = 10
 HOTKEY_KEYS = ("ptt_key", "ptt_key_alt", "hotkey", "undo_key")
+# Цонх фокус аваагүй бол эдгээр хугацааны дараа дахин оролдоно. Windows нь
+# өөр процесс сая ажилласан агшинд фокус солихыг хаадаг ба тэр хориг хэдэн зуун
+# миллисекундын дараа суларна.
+FOCUS_RETRY_MS = (250, 800)
 
 
 class MonspeechApp:
     def __init__(self) -> None:
         self.cfg = Config.load()
+        # Автомат эхлүүлэлтийн үнэний эх сурвалж нь бүртгэл — хэрэглэгч түүнийг
+        # гараар цэвэрлэсэн байж болох тул чагтаа тэндээс тааруулна
+        self.cfg["start_with_windows"] = autostart.enabled()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.segments: queue.Queue = queue.Queue()
         self.listening = False
@@ -299,6 +307,15 @@ class MonspeechApp:
         self.cfg.save()
         self.ui.set_detail(f"Хэл: {CODE_TO_NAME.get(code, code)}")
 
+    def on_alt_lang_changed(self, code: str) -> None:
+        """Хоёрдогч товчлуураар ярих хэл. Товчлуурыг дахин холбох шаардлагагүй —
+        холбоос нь дарах агшинд тохиргооноос уншдаг."""
+        self.cfg["lang_alt"] = code
+        self.cfg.save()
+        self.ui.set_detail(
+            f"{pretty(self.cfg['ptt_key_alt'])}: {CODE_TO_NAME.get(code, code)}"
+        )
+
     def on_mic_changed(self, index: int) -> None:
         self.cfg["mic_index"] = index
         self.recorder.device_index = None if index < 0 else index
@@ -320,7 +337,20 @@ class MonspeechApp:
             self._apply_tray_setting()
         elif key == "wave_overlay" and not value:
             self.overlay.hide()
+        elif key == "start_with_windows":
+            self._apply_autostart_setting(bool(value))
         self.cfg.save()
+
+    def _apply_autostart_setting(self, wanted: bool) -> None:
+        """Бүртгэлд бичихэд амжилтгүй бол чагтыг үнэн байдалд нь буцаана."""
+        error = autostart.apply(wanted)
+        if not error:
+            return
+        self.cfg["start_with_windows"] = not wanted
+        toggle = self.ui.toggles.get("start_with_windows")
+        if toggle:
+            toggle.set(self.cfg["start_with_windows"])
+        self.ui.set_detail(error)
 
     def _apply_tray_setting(self) -> None:
         if self.cfg["tray_enabled"]:
@@ -339,6 +369,9 @@ class MonspeechApp:
             self.recorder.keep_open_seconds = float(value)
             if not value:
                 self.recorder.close()
+        elif key == "max_recording_seconds":
+            # Явж байгаа бичлэгт ч шууд үйлчилнэ
+            self.recorder.max_seconds = float(value)
         self.cfg.save()
 
     def _insert_mode(self) -> str:
@@ -561,7 +594,28 @@ class MonspeechApp:
         # фокус өгөх эрхгүй байж болно (.exe хувилбарт ачаалагч нь өөрийгөө хүү
         # процесс болгон ажиллуулдаг тул эрх нь дамждаггүй). Иймд цонхоо өөрөө
         # урд нь гаргана — текст буулгахад ашигладаг тэр л аргачлал.
-        activate(hwnd)
+        if activate(hwnd):
+            return
+        # Аппыг эхлүүлсэн процесс (Explorer гэх мэт) гарах зуур Windows фокусыг
+        # түр өөртөө барьж мэднэ. Богино хүлээгээд дахин оролдоно — `activate`
+        # нь Tk-ийн thread дээр ~0.2 сек блоклодог тул шууд давтаж болохгүй.
+        self._schedule_focus_retries(hwnd, FOCUS_RETRY_MS)
+
+    def _schedule_focus_retries(self, hwnd, delays: tuple[int, ...]) -> None:
+        if not delays:
+            return
+        self.root.after(delays[0], lambda: self._retry_focus(hwnd, delays[1:]))
+
+    def _retry_focus(self, hwnd, remaining: tuple[int, ...]) -> None:
+        try:
+            if not self.root.winfo_viewable():
+                return  # хооронд нь хэрэглэгч цонхыг хаачихсан байна
+            if ctypes.windll.user32.GetForegroundWindow() == hwnd:
+                return
+        except (tk.TclError, OSError):
+            return
+        if not activate(hwnd):
+            self._schedule_focus_retries(hwnd, remaining)
 
     def on_close(self) -> None:
         # Дүрс үнэхээр цагны хажууд байгаа эсэхийг шалгана — зөвхөн тохиргоог
