@@ -22,6 +22,11 @@ a = Analysis(
         "pystray._win32",
         "pynput.keyboard._win32",
         "pynput.mouse._win32",
+        # Танигчид нь `recognizer.create()` дотроос импортлогддог (тойрог
+        # үүсэхээс сэргийлж). Багцлагч ийм импортыг олдог ч энд бичиж
+        # баталгаажуулав — олдохгүй бол зөвхөн танигч солиход л унана.
+        "monspeech.stt_google",
+        "monspeech.stt_openai",
     ],
     hookspath=[],
     runtime_hooks=[],

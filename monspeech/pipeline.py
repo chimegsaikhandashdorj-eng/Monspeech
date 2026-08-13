@@ -73,7 +73,7 @@ class RecognitionWorker:
         spoken_seconds = len(pcm) / (RATE * BYTES_PER_SAMPLE)
         try:
             cleaned = prepare_segment(pcm, RATE)
-            raw, confidence = self.recognizer.recognize(cleaned, RATE, lang)
+            alternatives, confidence = self.recognizer.recognize(cleaned, RATE, lang)
         except Exception as exc:  # noqa: BLE001
             # Хүлээлтийн тоог эхлээд бууруулна — эс бөгөөс төлөв шинэчлэгдэж,
             # алдааны мессежийг тэр дороо дарж орхино.
@@ -83,20 +83,38 @@ class RecognitionWorker:
             self.events.put(("error", message))
             return
 
+        # Үйлчилгээ хэд хэдэн хувилбар буцаадаг; хэрэглэгчийн үгсийн санд
+        # нийцэхийг нь сонгоно (хариунд аль хэдийн ирсэн тул саатал нэмэгдэхгүй).
+        raw = self.formatter.choose(alternatives)
+
         elapsed_ms = (time.monotonic() - started) * 1000
         log.info(
-            "таньсан: %.1f сек дуу → %d тэмдэгт, итгэлцэл %.2f, %.0f мс",
-            spoken_seconds, len(raw), confidence, elapsed_ms,
+            "таньсан: %.1f сек дуу → %d тэмдэгт, %d хувилбар, итгэлцэл %.2f, %.0f мс",
+            spoken_seconds, len(raw), len(alternatives), confidence, elapsed_ms,
         )
+        if raw and raw != alternatives[0]:
+            # Текстийг лог руу бичихгүй — зөвхөн хэд дэх хувилбарыг сонгосныг.
+            log.info("толиор %d дэх хувилбарыг сонголоо", alternatives.index(raw) + 1)
         self.events.put(("pending", -1))
 
         if not raw:
             self.events.put(("empty", "unrecognized"))
             return
+        # Итгэлцлийн шүүлт цэвэрлэгээнээс ӨМНӨ: итгэлцэл багатай чимээ
+        # цэвэрлэгээгээр хоосорвол хэрэглэгчид «зөвхөн чигчлүүр сонсогдлоо»
+        # гэж буруу шалтгаан харагдана.
         if confidence < float(self.cfg["min_confidence"]):
             log.info("итгэлцэл бага тул алгаслаа (%.2f)", confidence)
             self.events.put(("empty", "low_confidence"))
             return
+        if self.cfg["clean_speech"]:
+            # Дуут командыг («буцаа») цэвэрлэгээ хөндөхгүй: тэдгээр нь
+            # чигчлүүрийн жагсаалтад байхгүй тул бүтнээрээ үлдэнэ.
+            cleaned_raw = textproc.clean_speech(raw)
+            if not cleaned_raw:
+                self.events.put(("empty", "filler"))
+                return
+            raw = cleaned_raw
 
         if textproc.match_action(raw) == "undo":
             self.events.put(("undo", None))
@@ -107,6 +125,8 @@ class RecognitionWorker:
             return
         shown = text.strip() or raw
         self.stats.record(shown, spoken_seconds, elapsed_ms)
+        # Батлагдсан текст — дараагийн хувилбар сонголтод жин болно.
+        self.formatter.remember(shown)
         entry = self.transcripts.add(shown, lang, spoken_seconds)
         self.events.put(("recognized", (shown, entry)))
         self.deliver(text, backspaces)

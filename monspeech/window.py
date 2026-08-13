@@ -17,7 +17,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from . import __version__, icons, textproc, theme
+from . import __version__, icons, recognizer, textproc, theme
 from .hotkeys import pretty
 from .orb import RobotOrb
 from .widgets import (
@@ -35,6 +35,7 @@ from .widgets import (
     Slider,
     StatTile,
     Toggle,
+    rounded_entry,
     scrollbar,
 )
 
@@ -72,6 +73,13 @@ WRITING_TOGGLES = [
      "Шинэ өгүүлбэрийн эхний үсгийг том болгоно"),
     ("voice_punctuation", "Дуут цэг таслал",
      "«цэг», «таслал», «шинэ мөр» гэж хэлэхэд тэмдэг болгоно"),
+    ("clean_speech", "Чигчлүүр цэвэрлэх",
+     "«ааа», эхний «за», давхардсан үг, «үгүй ээ» гэж зассаныг хасна"),
+]
+STT_FIELDS = [
+    ("stt_url", "Хаяг", "…/v1/audio/transcriptions"),
+    ("stt_model", "Загвар", "Үйлчилгээний зааж өгсөн нэр"),
+    ("stt_key", "API түлхүүр", "Шаардахгүй сервер бол хоосон"),
 ]
 MODE_TOGGLES = [
     ("ptt_enabled", "Push-to-talk горим",
@@ -435,6 +443,7 @@ class ControlWindow:
             Page(self.stack, "Төлөв", aside=f"{pretty(self.app.cfg['ptt_key'])} дарж барин ярь")
         )
 
+        self._welcome_card(page)
         hero = Card(page.body)
         inner = tk.Frame(hero.body, bg=theme.PANEL)
         inner.pack(pady=(10, 16))
@@ -501,6 +510,57 @@ class ControlWindow:
         self.tile_grid.bind("<Configure>", self._tiles_resized)
         page.spacer()
         self.refresh_stats()
+
+    def _welcome_card(self, page) -> None:
+        """Анх ажиллуулахад л гарах гурван алхамт танилцуулга.
+
+        Дараалал нь санаатай: микрофон ажиллахгүй бол хэл, товчлуур хоёр
+        утгагүй; хэлээ сонгоогүй бол товч дарахад буруу хэлээр танина. Тиймээс
+        микрофон → хэл → товчлуур. Эхний хоёр нь «Яриа» хуудас руу үсэрнэ,
+        гурав дахийг нь хэрэглэгч байгаа газраа туршина.
+
+        Аппын гол санаа нь цонх огт нээхгүйгээр ажиллах явдал тул төгсгөлд нь
+        цонхыг хаах нь аппыг зогсоохгүй гэдгийг сануулна. Дараа нь дахин
+        гарахгүй.
+        """
+        self.welcome = None
+        if self.app.cfg["onboarded"]:
+            return
+
+        card = Card(page.body)
+        self.welcome = card
+
+        names, _ = self.app.list_microphones()
+        # Эхний нэр нь үргэлж «Системийн үндсэн» тул жинхэнэ төхөөрөмж
+        # илэрсэн эсэхийг үлдсэнээр нь мэднэ.
+        found = len(names) - 1
+        _, holder = card.row(
+            "1. Микрофон",
+            f"{found} төхөөрөмж илэрлээ" if found else "Төхөөрөмж илрээгүй — залгаад шалгана уу",
+        )
+        Button(holder, "Сонгох", lambda: self.select(1)).pack()
+
+        _, holder = card.row(
+            "2. Ярих хэл",
+            f"Одоо: {CODE_TO_NAME.get(self.app.cfg['lang'], self.app.cfg['lang'])}",
+        )
+        Button(holder, "Солих", lambda: self.select(1)).pack()
+
+        combo = pretty(self.app.cfg["ptt_key"])
+        card.row(
+            f"3. {combo} дарж бариад ярь",
+            "Курсороо текст бичих цонхон дээр тавиад тушаа — товчоо тавимагц шивэгдэнэ",
+        )
+
+        _, holder = card.row("Аппын цонх хэрэггүй", "Хаавал цагны хажууд үлдэнэ")
+        Button(holder, "Ойлголоо", self._finish_welcome).pack()
+
+    def _finish_welcome(self) -> None:
+        self.app.finish_onboarding()
+        if self.welcome is not None:
+            self.welcome.destroy()
+            self.welcome = None
+        self.set_detail("Амжилттай! Дахиад хэрэгтэй бол README-г үзнэ үү.")
 
     def _tiles_resized(self, event) -> None:
         """Нарийн цонхонд 4 картыг нэг эгнээнд багтаахад кирилл шошго таслагдана."""
@@ -583,7 +643,93 @@ class ControlWindow:
             "Долгион харуулах", "Курсорын доорх капсул дээр 9 багана"
         )
         self._toggle(holder, "wave_overlay")
-        page.spacer()
+
+        self._stt_card(page)
+        self._stt_tail = page.spacer()
+        self._sync_stt_fields()
+
+    # --- Танигч сонгох ----------------------------------------------
+    def _stt_card(self, page) -> None:
+        """Аль үйлчилгээгээр таних вэ.
+
+        Анхны утга нь юу ч тохируулахгүйгээр ажилладаг тул хаяг/загвар/түлхүүрийн
+        талбарууд зөвхөн өөрийн үйлчилгээ сонгосон үед л гарна — ихэнх хүнд
+        эдгээрийг харах шаардлагагүй.
+        """
+        names = recognizer.titles()
+        self._stt_titles = dict(names)
+        self._stt_names = {title: name for name, title in names}
+
+        card = Card(page.body)
+        _, holder = card.row("Танигч", "Google нь түлхүүр шаардахгүй")
+        self.stt_var = tk.StringVar(
+            value=self._stt_titles.get(self.app.cfg["stt_provider"], names[0][1])
+        )
+        self._combo(
+            holder, self.stt_var, [title for _, title in names], self._stt_selected
+        )
+
+        # Тусдаа карт — сонголтоос хамааран харагдана/нуугдана
+        self._stt_shown = False
+        self.stt_extra = Card(page.body, pad=False)
+        self.stt_vars: dict[str, tk.StringVar] = {}
+        for key, title, desc in STT_FIELDS:
+            _, holder = self.stt_extra.row(title, desc)
+            variable = tk.StringVar(value=str(self.app.cfg[key]))
+            self.stt_vars[key] = variable
+            self._field(holder, variable, secret=key == "stt_key")
+        self.stt_extra.note("Түлхүүр тохиргооны файлд ил хадгалагдана")
+        self._stt_applied = self._stt_values()
+
+    def _field(self, parent, variable, secret: bool = False) -> tk.Entry:
+        """Тохиргооны текстийн талбар — гармагц хадгална."""
+        box, entry = rounded_entry(
+            parent, variable, width=24, font=theme.UI_SMALL, secret=secret
+        )
+        box.pack()
+        # Бичих бүрт биш, талбараас гармагц (эсвэл Enter дарахад) хадгална
+        entry.bind("<FocusOut>", lambda _e: self._stt_changed())
+        entry.bind("<Return>", lambda _e: self._stt_changed())
+        return entry
+
+    def _stt_values(self) -> dict[str, str]:
+        values = {"stt_provider": self._stt_names.get(self.stt_var.get(), "google")}
+        for key, variable in self.stt_vars.items():
+            values[key] = variable.get().strip()
+        return values
+
+    def _sync_stt_fields(self) -> None:
+        """Талбаруудыг харуулах/нуух.
+
+        Төлөв нь аль хэдийн зөв бол юу ч хийхгүй: багцлалт өөрчлөх нь фокусын
+        эвент төрүүлдэг ба тэр нь эргээд энэ функцийг дуудвал цонх мөчлөгт
+        орж гацна.
+        """
+        wanted = self._stt_names.get(self.stt_var.get(), "google") != "google"
+        if wanted == self._stt_shown:
+            return
+        self._stt_shown = wanted
+        if wanted:
+            self.stt_extra.pack(
+                fill="x", padx=theme.PAGE_PAD_X, pady=(0, theme.GAP),
+                before=self._stt_tail,
+            )
+        else:
+            self.stt_extra.pack_forget()
+
+    def _stt_selected(self) -> None:
+        """Танигч солигдлоо — талбаруудыг тааруулаад хэрэглэнэ."""
+        self._sync_stt_fields()
+        self._stt_changed()
+
+    def _stt_changed(self) -> None:
+        """FocusOut нь хуудас солиход ч дуудагддаг тул үнэхээр өөрчлөгдсөн
+        үед л танигчийг дахин босгоно."""
+        values = self._stt_values()
+        if values == self._stt_applied:
+            return
+        self._stt_applied = values
+        self.app.on_stt_changed(values)
 
     def _lang_changed(self) -> None:
         self.app.on_lang_changed(NAME_TO_CODE[self.lang_var.get()])
@@ -609,7 +755,7 @@ class ControlWindow:
 
     def _option_changed(self, key: str, value: bool) -> None:
         self.app.on_option_changed(key, value)
-        if key in ("auto_capitalize", "auto_space", "voice_punctuation"):
+        if key in ("auto_capitalize", "auto_space", "voice_punctuation", "clean_speech"):
             self._refresh_preview()
 
     # --- 3. Бичилт --------------------------------------------------
@@ -644,9 +790,15 @@ class ControlWindow:
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
+        """Жишээ өгүүлбэр: «за ааа өнөөдрийн хурал 3 цагт болно цэг» гэж хэлсэн гэж үзнэ."""
         cfg = self.app.cfg
-        text = "Өнөөдрийн" if cfg["auto_capitalize"] else "өнөөдрийн"
-        text += " хурал 3 цагт болно" + ("." if cfg["voice_punctuation"] else "")
+        text = "өнөөдрийн хурал 3 цагт болно"
+        if not cfg["clean_speech"]:
+            text = "за ааа " + text  # цэвэрлэхгүй бол хэлсэн чигээрээ
+        if cfg["voice_punctuation"]:
+            text += "."
+        if cfg["auto_capitalize"]:
+            text = text[0].upper() + text[1:]
         self.preview_var.set(("␣" if cfg["auto_space"] else "") + text)
 
     def _remember_type_mode_app(self) -> None:
@@ -805,9 +957,27 @@ class ControlWindow:
         self._toggle(holder, "start_with_windows")
         _, holder = card.row("Хаахад tray руу нуух", "Хаах товч дарахад аппыг зогсоохгүй")
         self._toggle(holder, "tray_enabled")
-        _, holder = card.row("Лог ба хувилбар", f"Monspeech {__version__} · Windows")
-        Button(holder, "Логийн хавтас", self.app.open_log).pack()
+        _, holder = card.row("Шинэчлэл шалгах", "Эхлэхдээ GitHub-аас нэг удаа")
+        self._toggle(holder, "check_updates")
+
+        # Тайлбар нь амьд: шинэчлэл олдоход текст нь солигдоно.
+        self.version_var = tk.StringVar(value=f"Monspeech {__version__} · Windows")
+        _, holder = card.row("Хувилбар", self.version_var)
+        self.update_button = Button(holder, "Шинэчлэл авах", self.app.open_releases)
+
+        _, holder = card.row("Алдаа мэдээлэх", "Орчны мэдээлэл ба лог")
+        Button(holder, "Логийн хавтас", self.app.open_log).pack(side="left", padx=(0, 6))
+        Button(holder, "Мэдээлэл хуулах", self._copy_diagnostics).pack(side="left")
         page.spacer()
+
+    def _copy_diagnostics(self) -> None:
+        self.set_detail(self.app.copy_diagnostics())
+
+    def show_update(self, tag: str) -> None:
+        """Шинэ хувилбар олдлоо — «Нэмэлт» хуудсанд товч гаргана."""
+        self.version_var.set(f"Monspeech {__version__} · шинэ хувилбар: {tag}")
+        self.update_button.pack()
+        self.set_detail(f"Шинэ хувилбар гарсан байна: {tag}")
 
     # ------------------------------------------------------------------
     # Гаднаас дуудагдах

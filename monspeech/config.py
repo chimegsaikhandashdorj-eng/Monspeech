@@ -23,6 +23,8 @@ DEFAULTS: dict[str, Any] = {
     "type_mode": False,
     "auto_capitalize": True,
     "voice_punctuation": True,
+    # Ярианы чигчлүүр («ааа», эхний «за», давталт, өөрийгөө засах) хасах
+    "clean_speech": True,
     "wave_overlay": True,
     "tray_enabled": True,
     # Windows асахад автоматаар ажиллах. Үнэний эх сурвалж нь бүртгэл (autostart.py)
@@ -54,6 +56,17 @@ DEFAULTS: dict[str, Any] = {
     # Хоёрдогч хэл (өөр товчлуураар)
     "ptt_key_alt": "<cmd>+<shift>",
     "lang_alt": "en-US",
+    # Аль танигчаар таних: "google" (үнэгүй, түлхүүргүй) эсвэл "openai"
+    # (хэрэглэгчийн өөрийн үйлчилгээ). Доорх гурав нь зөвхөн "openai"-д.
+    "stt_provider": "google",
+    "stt_url": "",
+    "stt_model": "",
+    # ⚠️ Түлхүүр энд ил бичигдэнэ — апп нууц хадгалах сан ашигладаггүй
+    "stt_key": "",
+    # Эхлэхдээ GitHub-аас шинэ хувилбар гарсан эсэхийг шалгах (IP харагдана)
+    "check_updates": True,
+    # Анх ажиллуулахад танилцуулах карт харуулсан эсэх
+    "onboarded": False,
 }
 
 # Тоон утгуудын зөвшөөрөгдөх хүрээ. Гараар засаад хэт том утга бичихэд апп

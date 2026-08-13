@@ -246,6 +246,39 @@ def wrap_to(label: tk.Label, container: tk.Widget, inset: int = 6) -> tk.Label:
     return label
 
 
+def rounded_entry(
+    parent,
+    variable,
+    *,
+    width: int,
+    font=theme.UI,
+    secret: bool = False,
+    stretch: bool = False,
+) -> tuple[RoundedBox, tk.Entry]:
+    """Дугуй хайрцаг доторх текстийн талбар (`tk.Entry` өөрөө дөрвөлжин).
+
+    Хайрцгийг багцлахгүй буцаана — дуудагч `pack` эсвэл `grid`-ээр өөрөө
+    байрлуулна.
+
+    ⚠️ `width` нь ТЭМДЭГТЭЭР тогтмол. `fill="x"`-ээр сунгавал мөрийн өргөн →
+    тайлбарын мөр таслалт → мөрийн өргөн гэсэн хэлхээ үүсч, цонх хэмжээгээ
+    хоёр утгын хооронд эргэлдүүлж гацдаг. `stretch` нь зөвхөн эзэн виджет нь
+    өргөнөө өөрөө тогтоодог газарт (`grid` багана) хэрэглэнэ.
+    """
+    box = RoundedBox(
+        parent, fill=theme.PANEL2, outside=theme.PANEL,
+        radius=theme.RADIUS_SMALL, border=None, pad=(theme.RADIUS_SMALL, 4),
+    )
+    entry = tk.Entry(
+        box.inner, textvariable=variable, bg=theme.PANEL2, fg=theme.TEXT,
+        insertbackground=theme.TEXT, relief="flat", font=font,
+        highlightthickness=0, bd=0, width=width,
+        show="•" if secret else "",
+    )
+    entry.pack(fill="x" if stretch else "none")
+    return box, entry
+
+
 def gradient_colours(count: int) -> list[str]:
     """Логоны 9 зогсоолыг `count` ширхэг өнгө болгон сунгана."""
     stops = [tuple(int(c[i : i + 2], 16) for i in (1, 3, 5)) for c in theme.GRADIENT]
@@ -446,8 +479,15 @@ class Card(RoundedBox):
         if self._rows:
             tk.Frame(self.inner, bg=theme.ROW_LINE, height=1).pack(fill="x")
 
-    def row(self, title: str = "", desc: str = "") -> tuple[tk.Frame, tk.Frame]:
-        """Гарчиг + тайлбар зүүн талд, удирдлага баруун талд байх мөр."""
+    def row(
+        self, title: str = "", desc: str | tk.StringVar = ""
+    ) -> tuple[tk.Frame, tk.Frame]:
+        """Гарчиг + тайлбар зүүн талд, удирдлага баруун талд байх мөр.
+
+        `desc` нь `StringVar` байвал тайлбар амьд болно — ажиллаж байхад
+        солигдох мөрүүд (шинэчлэл олдох гэх мэт) зүүн талаа өөрсдөө угсрах
+        шаардлагагүй.
+        """
         self.separator()
         self._rows += 1
         row = tk.Frame(self.inner, bg=self._bg)
@@ -463,9 +503,11 @@ class Card(RoundedBox):
                 text, text=title, bg=self._bg, fg=theme.TEXT, font=theme.UI_TITLE, anchor="w"
             ).pack(fill="x")
             if desc:
+                live = isinstance(desc, tk.Variable)
                 label = tk.Label(
-                    text, text=desc, bg=self._bg, fg=theme.MUTED, font=theme.UI_SMALL,
+                    text, bg=self._bg, fg=theme.MUTED, font=theme.UI_SMALL,
                     anchor="w", justify="left", wraplength=380,
+                    **({"textvariable": desc} if live else {"text": desc}),
                 )
                 label.pack(fill="x", pady=(3, 0))
                 wrap_to(label, text)
@@ -856,12 +898,14 @@ class PairEditor(RoundedBox):
 
         left = tk.StringVar(value=key)
         right = tk.StringVar(value=value)
-        first_box, first = self._entry(inner, left)
+        first_box, first = rounded_entry(inner, left, width=8, stretch=True)
         first_box.grid(row=0, column=0, sticky="ew")
         tk.Label(
             inner, text="→", bg=theme.PANEL, fg=theme.DIM, font=theme.MONO_KEY
         ).grid(row=0, column=1, padx=8)
-        self._entry(inner, right)[0].grid(row=0, column=2, sticky="ew")
+        rounded_entry(inner, right, width=8, stretch=True)[0].grid(
+            row=0, column=2, sticky="ew"
+        )
 
         remove = tk.Label(
             inner, bg=theme.PANEL, cursor="hand2",
@@ -884,20 +928,6 @@ class PairEditor(RoundedBox):
         """Хоёр талбарын багана яг тэнцүү — толгой мөр ч мөрүүд ч ижил."""
         frame.columnconfigure(0, weight=1, uniform="pair")
         frame.columnconfigure(2, weight=1, uniform="pair")
-
-    def _entry(self, parent, variable) -> tuple[RoundedBox, tk.Entry]:
-        """Оролтыг дугуй хайрцаг дотор байрлуулна (tk.Entry өөрөө дөрвөлжин)."""
-        box = RoundedBox(
-            parent, fill=theme.PANEL2, outside=theme.PANEL,
-            radius=theme.RADIUS_SMALL, border=None, pad=(theme.RADIUS_SMALL, 4),
-        )
-        entry = tk.Entry(
-            box.inner, textvariable=variable, bg=theme.PANEL2, fg=theme.TEXT,
-            insertbackground=theme.TEXT, relief="flat", font=theme.UI,
-            highlightthickness=0, bd=0, width=8,
-        )
-        entry.pack(fill="x")
-        return box, entry
 
     def _remove(self, row: tk.Frame) -> None:
         self._rows = [item for item in self._rows if item[0] is not row]

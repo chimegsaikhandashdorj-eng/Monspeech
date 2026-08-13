@@ -107,6 +107,19 @@ class FakeApp:
         self.saved_snippets = raw
         return raw.count("=")
 
+    def open_releases(self):
+        self.opened_releases = True
+
+    def copy_diagnostics(self):
+        return "Мэдээллийг хууллаа"
+
+    def finish_onboarding(self):
+        self.cfg["onboarded"] = True
+
+    def on_stt_changed(self, values):
+        self.cfg.update(values)
+        return f"Танигч: {values['stt_provider']}"
+
 
 try:
     root = tk.Tk()
@@ -159,9 +172,11 @@ ui.search_var.set("")
 root.update()
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 10)
+check("чагтын тоо", len(ui.toggles), 12)
+check("шинэчлэл шалгах чагт", "check_updates" in ui.toggles, True)
 check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
 check("долгион чагт", "wave_overlay" in ui.toggles, True)
+check("чигчлүүр цэвэрлэх чагт", "clean_speech" in ui.toggles, True)
 
 # --- Гулсуурууд (өмнө нь combobox байсан) ---
 check("гулсуурын тоо", len(ui.sliders), 4)
@@ -235,6 +250,37 @@ check("урьдчилан харах эхэлдэг", ui.preview_var.get().start
 ui.toggles["auto_capitalize"]._clicked()
 root.update()
 check("том үсэг унтраахад тусав", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
+
+# --- Анх ажиллуулахад танилцуулга гарна, дараа нь дахин гарахгүй ---
+check("танилцуулга гарсан", shown(ui.welcome), True)
+ui._finish_welcome()
+root.update()
+check("товшсоны дараа алга болсон", ui.welcome, None)
+check("дахин гарахгүй гэж тэмдэглэсэн", app.cfg["onboarded"], True)
+
+# --- Шинэ хувилбар олдвол мэдэгдэнэ ---
+check("эхэндээ товч нуугдсан", shown(ui.update_button), False)
+ui.show_update("v9.9.9")
+root.update()
+check("хувилбарын мөр солигдсон", "v9.9.9" in ui.version_var.get(), True)
+check("шинэчлэх товч гарсан", shown(ui.update_button), True)
+
+# --- Танигч: нэмэлт талбарууд зөвхөн өөрийн үйлчилгээнд гарна ---
+check("анхандаа талбарууд нуугдсан", shown(ui.stt_extra), False)
+check("гурван талбар бэлдсэн", sorted(ui.stt_vars), ["stt_key", "stt_model", "stt_url"])
+ui.stt_var.set("Өөрийн үйлчилгээ (OpenAI-нийцтэй)")
+ui._stt_selected()
+root.update()
+check("сонгоход талбарууд гарсан", shown(ui.stt_extra), True)
+check("тохиргоо хадгалагдсан", app.cfg["stt_provider"], "openai")
+ui.stt_vars["stt_url"].set("https://example.test/v1/audio/transcriptions")
+ui._stt_changed()
+check("хаяг хадгалагдсан", app.cfg["stt_url"], "https://example.test/v1/audio/transcriptions")
+ui.stt_var.set("Google (үнэгүй, түлхүүргүй)")
+ui._stt_selected()
+root.update()
+check("буцаад нуугдсан", shown(ui.stt_extra), False)
+check("буцаад google болсон", app.cfg["stt_provider"], "google")
 
 # --- Sidebar хумих ---
 ui.toggle_sidebar()
