@@ -237,6 +237,27 @@ def _collapse_repeats(words: list[str]) -> list[str]:
     return out
 
 
+#: Кирилл үсгийн хүрээ (монгол өргөтгөлүүд болох ө, ү багтана).
+_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+#: Латин үсэг.
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def looks_foreign(text: str) -> bool:
+    """Монголоор таньсан гэж хэлж буй текст үнэндээ кирилл биш байна уу.
+
+    Танигч `mn-MN`-ээр асуухад англи яриаг сонсвол латинаар бичсэн үр дүн
+    буцаадаг. Тоо, цэг таслал ганцаараа шийдэхгүй тул ҮСЭГ л тоологдоно:
+    үсэг огт байхгүй бол «мэдэхгүй» гэж үзээд худал буцаана (эргэлзвэл
+    хөндөхгүй).
+    """
+    cyrillic = len(_CYRILLIC.findall(text))
+    latin = len(_LATIN.findall(text))
+    if not latin:
+        return False
+    return latin > cyrillic
+
+
 def clean_speech(raw: str) -> str:
     """Ярианы чигчлүүрийг хасаж, бичихэд тохирох хэлбэрт оруулна.
 

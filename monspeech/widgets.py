@@ -279,6 +279,17 @@ def rounded_entry(
     return box, entry
 
 
+def combo(parent, variable, values, command) -> ttk.Combobox:
+    """Уншихаас өөр боломжгүй сонголтын цэс. Сонгомогц `command` дуудагдана."""
+    box = ttk.Combobox(
+        parent, textvariable=variable, values=values, state="readonly",
+        style="Mon.TCombobox", width=22,
+    )
+    box.pack()
+    box.bind("<<ComboboxSelected>>", lambda _e: command())
+    return box
+
+
 def gradient_colours(count: int) -> list[str]:
     """Логоны 9 зогсоолыг `count` ширхэг өнгө болгон сунгана."""
     stops = [tuple(int(c[i : i + 2], 16) for i in (1, 3, 5)) for c in theme.GRADIENT]
@@ -362,7 +373,19 @@ class Toggle(tk.Label):
 
 
 class ScrollFrame(tk.Frame):
-    """Гүйлгэдэг талбар. Агуулгыг `.body` дотор байрлуулна."""
+    """Гүйлгэдэг талбар. Агуулгыг `.body` дотор байрлуулна.
+
+    ⚠️ Гүйлгэгч нь `place`-ээр агуулгын ДЭЭР давхарлагдана, `pack`-аар хажууд нь
+    биш. Учир нь: `pack` бол гүйлгэгч зай эзэлж, агуулгын өргөнийг нарийсгана.
+    Нарийссан өргөн нь урт тайлбаруудыг нэмэлт мөрөнд шилжүүлж, агуулгыг уртасгаж,
+    гүйлгэгчийг хэрэгтэй хэвээр үлдээнэ — цонх хоёр хэмжээний хооронд
+    ТӨГСГӨЛГҮЙ эргэлдэж гацдаг. `place` нь урсгалаас гадуур тул энэ гогцоо
+    үүсэхгүй.
+    """
+
+    #: Гүйлгэгчийн өргөн (пиксел). Агуулга үүгээр нарийсахгүй — зөвхөн баруун
+    #: захын дотоод зай болж, текст доогуур нь орохоос сэргийлнэ.
+    BAR_WIDTH = 12
 
     def __init__(self, parent, bg: str = theme.BG) -> None:
         super().__init__(parent, bg=bg)
@@ -372,24 +395,39 @@ class ScrollFrame(tk.Frame):
         self.canvas.configure(yscrollcommand=self._on_scroll)
         self.body = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self._bar_shown = False
 
         self.body.bind("<Configure>", self._resize_body)
         self.canvas.bind("<Configure>", self._resize_canvas)
         self.bind_all("<MouseWheel>", self._wheel, add="+")
 
     def _on_scroll(self, first, last) -> None:
-        """Бүх агуулга багтаж байвал гүйлгэгчийг нуухгүй харуулахгүй."""
-        if float(first) <= 0.0 and float(last) >= 1.0:
-            self.scrollbar.pack_forget()
-        else:
-            self.scrollbar.pack(side="right", fill="y")
+        """Бүх агуулга багтаж байвал гүйлгэгчийг харуулахгүй.
+
+        Харагдах/нуугдах нь агуулгын өргөнд НӨЛӨӨЛӨХГҮЙ (`place` тул) — өөрөөр
+        хэлбэл энэ дуудалт дахин `_on_scroll` төрүүлэхгүй.
+        """
+        needed = not (float(first) <= 0.0 and float(last) >= 1.0)
+        if needed != self._bar_shown:
+            self._bar_shown = needed
+            if needed:
+                self.scrollbar.place(
+                    relx=1.0, rely=0.0, anchor="ne", relheight=1.0, width=self.BAR_WIDTH
+                )
+            else:
+                self.scrollbar.place_forget()
         self.scrollbar.set(first, last)
 
     def _resize_body(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _resize_canvas(self, event) -> None:
-        self.canvas.itemconfigure(self._window, width=event.width)
+        # Гүйлгэгчийн зайг ҮРГЭЛЖ үлдээнэ — харагдаж байгаа эсэхээс үл хамааран.
+        # Тогтмол учраас өргөн хэлбэлзэхгүй; хэлбэлзэл нь дээр тайлбарласан
+        # гогцоог төрүүлдэг.
+        self.canvas.itemconfigure(
+            self._window, width=max(1, event.width - self.BAR_WIDTH)
+        )
 
     def _wheel(self, event) -> None:
         try:

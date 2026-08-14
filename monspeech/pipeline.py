@@ -68,12 +68,55 @@ class RecognitionWorker:
             pcm, lang = item
             self._handle(pcm, lang)
 
+    def _retry_other_language(
+        self, pcm: bytes, lang: str, alternatives: list[str], confidence: float
+    ) -> tuple[list[str], float, str]:
+        """Буруу хэлээр сонссон бололтой бол хоёрдогч хэлээр нэг л удаа дахин асууна.
+
+        Гурван нөхцөл ЗЭРЭГ таарвал л дахин хүсэлт явна:
+
+        * танилт амжилттай боловч итгэлцэл нь хэрэглэгчийн босгоос доогуур,
+        * буцаасан текст нь үсгээрээ гадаад (кирилл биш),
+        * хоёрдогч хэл нь одоогийнхоос өөр.
+
+        Итгэлцэл өндөр байхад хөндөхгүй, кирилл гарсан бол хөндөхгүй — өөрөөр
+        хэлбэл ТОДОРХОЙГҮЙ тохиолдолд л хоёр дахь хүсэлт явна. Тиймээс дундаж
+        зардал бараг нэмэгдэхгүй. Дахилт бүтэлгүйтвэл анхны үр дүн хэвээр
+        үлдэнэ — нэмэлт онцлогоос болж танилт бүхэлдээ уначихгүй.
+        """
+        if not alternatives or not self.cfg["detect_language"]:
+            return alternatives, confidence, lang
+        if confidence >= float(self.cfg["min_confidence"]):
+            return alternatives, confidence, lang
+        if not textproc.looks_foreign(alternatives[0]):
+            return alternatives, confidence, lang
+        other = str(self.cfg["lang_alt"] or "")
+        if not other or other == lang:
+            return alternatives, confidence, lang
+
+        log.info("итгэлцэл бага, кирилл биш — %s хэлээр дахин оролдож байна", other)
+        try:
+            retry_alternatives, retry_confidence = self.recognizer.recognize(
+                pcm, RATE, other
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("хэл сэжиглэх дахилт бүтсэнгүй: %s", exc)
+            return alternatives, confidence, lang
+
+        if retry_alternatives and retry_confidence > confidence:
+            log.info("%s хэлний үр дүн илүү итгэлтэй байлаа", other)
+            return retry_alternatives, retry_confidence, other
+        return alternatives, confidence, lang
+
     def _handle(self, pcm: bytes, lang: str) -> None:
         started = time.monotonic()
         spoken_seconds = len(pcm) / (RATE * BYTES_PER_SAMPLE)
         try:
             cleaned = prepare_segment(pcm, RATE)
             alternatives, confidence = self.recognizer.recognize(cleaned, RATE, lang)
+            alternatives, confidence, lang = self._retry_other_language(
+                cleaned, lang, alternatives, confidence
+            )
         except Exception as exc:  # noqa: BLE001
             # Хүлээлтийн тоог эхлээд бууруулна — эс бөгөөс төлөв шинэчлэгдэж,
             # алдааны мессежийг тэр дороо дарж орхино.

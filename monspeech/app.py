@@ -22,7 +22,7 @@ import webbrowser
 
 import pyperclip
 
-from . import __version__, autostart, recognizer, update
+from . import __version__, autostart, recognizer, update, winfocus
 from .audio import MIN_THRESHOLD, Recorder
 from .config import Config
 from .history import InsertionHistory
@@ -34,7 +34,7 @@ from .pipeline import RecognitionWorker
 from .store import TranscriptStore, UsageStats
 from .textproc import Formatter, learn_corrections, parse_replacements
 from .tray import Tray
-from .window import CODE_TO_NAME, ControlWindow
+from .window import CODE_TO_NAME, ControlWindow, unknown_language_codes
 from .winfocus import TargetWindow, activate
 
 log = get_logger("app")
@@ -458,15 +458,26 @@ class MonspeechApp:
             self.recorder.max_seconds = float(value)
         self.cfg.save()
 
+    def _match_window(self, markers) -> str | None:
+        """Идэвхтэй цонхны гарчигт таарах эхний тэмдэг."""
+        return winfocus.match_marker(self.target.title(), markers)
+
     def _insert_mode(self) -> str:
         """Энэ цонхонд clipboard ажилладаггүй бол шууд бичих горимд шилжинэ."""
         if self.cfg["type_mode"]:
             return "type"
-        title = (self.target.title() or "").lower()
-        for marker in self.cfg["type_mode_apps"]:
-            if marker and marker.lower() in title:
-                return "type"
-        return "paste"
+        return "type" if self._match_window(self.cfg["type_mode_apps"]) else "paste"
+
+    def _window_lang(self) -> str:
+        """Идэвхтэй цонхонд тохирсон хэл, эс бөгөөс үндсэн хэл.
+
+        Cursor дээр англиар, Messenger дээр монголоор бичдэг хүн товчлуураа
+        сольж санахаа болино — цонх нь өөрөө хэлээ хэлнэ.
+        """
+        marker = self._match_window(self.cfg["lang_apps"])
+        if marker is None:
+            return str(self.cfg["lang"])
+        return str(self.cfg["lang_apps"].get(marker) or self.cfg["lang"])
 
     def remember_type_mode_app(self) -> str:
         """Одоогийн цонхыг "шууд бичих" жагсаалтад нэмнэ."""
@@ -488,6 +499,22 @@ class MonspeechApp:
         self.formatter.set_snippets(mapping)
         self.cfg.save()
         self.ui.set_detail(f"{len(mapping)} товчлол хадгалагдлаа.")
+        return len(mapping)
+
+    def on_lang_apps_changed(self, raw: str) -> int:
+        """Аппаар ялгах хэлний хүснэгт солигдлоо.
+
+        Танихгүй хэлний кодыг чимээгүй хаяхгүй — хэрэглэгч бичсэн зүйл нь
+        ажиллахгүй бол шалтгааныг нь хэлнэ.
+        """
+        mapping = parse_replacements(raw)
+        unknown = unknown_language_codes(mapping)
+        self.cfg["lang_apps"] = mapping
+        self.cfg.save()
+        if unknown:
+            self.ui.set_detail(f"Танихгүй хэлний код: {', '.join(unknown)}")
+        else:
+            self.ui.set_detail(f"{len(mapping)} аппын хэл хадгалагдлаа.")
         return len(mapping)
 
     def on_transcript_corrected(self, entry: dict, corrected: str) -> str:
@@ -622,7 +649,9 @@ class MonspeechApp:
             return
         # Товч дарсан агшны цонх бол текст очих ёстой цонх
         self.target.remember(skip=int(self.root.winfo_id()) if self.root.winfo_exists() else None)
-        self._active_lang = lang or self.cfg["lang"]
+        # Хоёрдогч товчлуураар шууд заасан хэл нь аппын профайлаас дээгүүр —
+        # хэрэглэгч зориуд дарсан бол түүнийг нь дийлэхгүй.
+        self._active_lang = lang or self._window_lang()
         self.recorder.max_seconds = float(self.cfg["max_recording_seconds"])
         self.recorder.segmenter.silence_hold = float(self.cfg["silence_hold"])
         error = self.recorder.start()

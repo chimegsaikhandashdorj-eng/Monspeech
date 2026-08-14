@@ -305,6 +305,7 @@ powershell -NoProfile -File tools\create_shortcut.ps1
 | [monspeech/recognizer.py](monspeech/recognizer.py) | Танигчийн залгуур: нийтлэг интерфейс, сонголт |
 | [monspeech/stt_google.py](monspeech/stt_google.py) | Google Web Speech (түлхүүргүй, анхны утга) |
 | [monspeech/stt_openai.py](monspeech/stt_openai.py) | OpenAI-нийцтэй танигч (өөрийн түлхүүрээр) |
+| [monspeech/stt_settings.py](monspeech/stt_settings.py) | «Яриа» хуудсан дахь танигчийн тохиргооны карт |
 | [monspeech/hotkeys.py](monspeech/hotkeys.py) | Глобал товчлуур, push-to-talk |
 | [monspeech/textproc.py](monspeech/textproc.py) | Цэг таслал, том үсэг, үг солих, чигчлүүр цэвэрлэх, хувилбар сонгох |
 | [monspeech/injector.py](monspeech/injector.py) | Курсор дээр текст буулгах |

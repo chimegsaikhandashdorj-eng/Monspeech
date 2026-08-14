@@ -1,7 +1,7 @@
 """Удирдлагын цонхны тест — sidebar + 7 хуудасны бүтэц зөв ажиллаж байна уу.
 
-Жинхэнэ Tk цонх үүсгэдэг (харагдахгүй) тул зөвхөн дэлгэцтэй орчинд ажиллана.
-Дэлгэцгүй бол чимээгүй алгасна.
+Жинхэнэ Tk цонх үүсгэдэг (дэлгэцээс гадуур, тунгалаг) тул зөвхөн дэлгэцтэй
+орчинд ажиллана. Дэлгэцгүй бол чимээгүй алгасна.
 
 Ажиллуулах:  .venv\\Scripts\\python.exe tests\\test_window.py
 """
@@ -30,8 +30,9 @@ def check(label, got, want):
 def shown(widget):
     """Виджет эцэгтээ багцлагдсан эсэх.
 
-    `winfo_ismapped()` нь withdraw хийсэн цонхны хүүхдүүдэд үргэлж худал
-    буцаадаг тул тестэд тохирохгүй — багцлагчаас нь асууна.
+    `winfo_ismapped()`-ийг ашиглахгүй: тэр нь зурагдсан эсэхийг хэлдэг тул
+    `update()` хэзээ дуудагдсанаас хамаарч хэлбэлзэнэ. Багцлагчаас асуувал
+    зорилго нь тодорхой — «энэ виджетийг харуулахаар тавьсан уу».
     """
     return bool(widget.winfo_manager())
 
@@ -107,6 +108,12 @@ class FakeApp:
         self.saved_snippets = raw
         return raw.count("=")
 
+    def on_lang_apps_changed(self, raw):
+        from monspeech.textproc import parse_replacements
+
+        self.cfg["lang_apps"] = parse_replacements(raw)
+        return len(self.cfg["lang_apps"])
+
     def open_releases(self):
         self.opened_releases = True
 
@@ -127,9 +134,16 @@ except tk.TclError as exc:  # дэлгэцгүй орчин
     print(f"алгаслаа (Tk нээгдсэнгүй: {exc})")
     raise SystemExit(0)
 
-root.withdraw()  # тестийн явцад дэлгэц дээр гарахгүй
+# Дэлгэцээс гадуур байрлуулна — `withdraw()` биш. Шалтгаан: withdraw хийсэн
+# цонхны хүүхдүүд map хийгддэггүй тул `event_generate` тэдэнд хүрэхгүй, товчлуурын
+# шалгалт санамсаргүй унана. Гадуур байрлуулбал эвент бодитоор дамжина.
+root.geometry("1000x700+-3000+-3000")
+try:
+    root.attributes("-alpha", 0.0)  # map хийгдсэн ч бүрэн үл үзэгдэх
+except tk.TclError:
+    pass  # энэ платформ дэмжихгүй бол дэлгэцээс гадуур байрлал хангалттай
 
-from monspeech.window import NAV, ControlWindow  # noqa: E402 - Tk шалгасны дараа
+from monspeech.window import NAV, ControlWindow, unknown_language_codes  # noqa: E402 - Tk шалгасны дараа
 
 app = FakeApp()
 ui = ControlWindow(root, app)
@@ -149,9 +163,28 @@ check("сонгосон хуудас харагдав", shown(ui.pages[3]), True
 check("өмнөх хуудас нуугдав", shown(ui.pages[0]), False)
 
 # --- Ctrl+1..7 ---
-root.event_generate("<Control-Key-5>")
+# Шинэ Tk процесст ХАМГИЙН ЭХНИЙ товчлуурын эвент хүрэлгүй алдагддаг (хэмжсэн:
+# дулаацуулалтгүй бол 60/60 алдана, нэг эвент илгээсний дараа 0/60). Тиймээс
+# эхлээд одоо байгаа хуудсаа сонгодог эвентээр дулаацуулж, дараа нь жинхэнэ
+# шалгалтаа хийнэ. `when="now"` нь дараалалд оруулахгүй шууд дамжуулна.
+root.focus_set()
+root.update()
+root.event_generate("<Control-Key-4>", when="now")
+root.update()
+root.event_generate("<Control-Key-5>", when="now")
 root.update()
 check("Ctrl+5 → Толь", ui.pages[ui.page_index].title, "Толь")
+
+# Курсор текстийн талбарт байхад ч товчлуур ажиллах ёстой. Tk-ийн `Entry`
+# класс нь Ctrl+товчлуурт ерөнхий холбоостой тул навигацийг залгичих
+# эрсдэлтэй — эвентийг талбар дээр шууд илгээж, `entry → Entry → цонх → all`
+# гэсэн гинжээр бүтэн явж байгааг баталгаажуулна.
+ui.select(0)
+root.update()
+check("хайлтын талбар Entry мөн", isinstance(ui.search.entry, tk.Entry), True)
+ui.search.entry.event_generate("<Control-Key-5>", when="now")
+root.update()
+check("талбар дотроос ч Ctrl+5 ажиллана", ui.pages[ui.page_index].title, "Толь")
 
 # --- Хайлт нь навигацийн туслах ---
 ui.search_var.set("микрофон")
@@ -172,7 +205,8 @@ ui.search_var.set("")
 root.update()
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 12)
+check("чагтын тоо", len(ui.toggles), 13)
+check("хэл сэжиглэх чагт", "detect_language" in ui.toggles, True)
 check("шинэчлэл шалгах чагт", "check_updates" in ui.toggles, True)
 check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
 check("долгион чагт", "wave_overlay" in ui.toggles, True)
@@ -201,6 +235,31 @@ root.update()
 check("мөр нэмэгдсэн", ui.pairs.mapping()["монспич"], "Monspeech")
 ui._save_dictionary(ui.pairs.mapping())
 check("толь хадгалагдсан", "монспич=Monspeech" in (app.saved_replacements or ""), True)
+
+# --- Толины гурав дахь таб: аппаар ялгах хэл ---
+ui._dictionary_tab(2)
+root.update()
+check("аппын хэлний таб хоосон", ui.pairs.mapping(), {})
+check(
+    "баганын шошго солигдов",
+    tuple(ui.pairs._labels),
+    ("Цонхны нэрний хэсэг", "Хэлний код"),
+)
+ui.pairs.add_row("Visual Studio Code", "en-US")
+root.update()
+ui._save_dictionary(ui.pairs.mapping())
+check("аппын хэл хадгалагдсан", app.cfg["lang_apps"], {"Visual Studio Code": "en-US"})
+
+# Танихгүй хэлний кодыг чимээгүй хүлээж авахгүй
+check(
+    "танихгүй код илэрнэ",
+    unknown_language_codes({"Notepad": "xx-YY", "Code": "en-US"}),
+    ["xx-YY"],
+)
+check("бүгд танигдвал хоосон", unknown_language_codes({"Code": "en-US"}), [])
+
+ui._dictionary_tab(0)
+root.update()
 
 # --- Хоёр дахь хэл цонхноос сонгогдоно ---
 check("одоогийн хоёр дахь хэл", ui.alt_lang_var.get(), "English (US)")
@@ -266,20 +325,20 @@ check("хувилбарын мөр солигдсон", "v9.9.9" in ui.version_v
 check("шинэчлэх товч гарсан", shown(ui.update_button), True)
 
 # --- Танигч: нэмэлт талбарууд зөвхөн өөрийн үйлчилгээнд гарна ---
-check("анхандаа талбарууд нуугдсан", shown(ui.stt_extra), False)
-check("гурван талбар бэлдсэн", sorted(ui.stt_vars), ["stt_key", "stt_model", "stt_url"])
-ui.stt_var.set("Өөрийн үйлчилгээ (OpenAI-нийцтэй)")
-ui._stt_selected()
+check("анхандаа талбарууд нуугдсан", shown(ui.stt.extra), False)
+check("гурван талбар бэлдсэн", sorted(ui.stt.vars), ["stt_key", "stt_model", "stt_url"])
+ui.stt.provider_var.set("Өөрийн үйлчилгээ (OpenAI-нийцтэй)")
+ui.stt._selected()
 root.update()
-check("сонгоход талбарууд гарсан", shown(ui.stt_extra), True)
+check("сонгоход талбарууд гарсан", shown(ui.stt.extra), True)
 check("тохиргоо хадгалагдсан", app.cfg["stt_provider"], "openai")
-ui.stt_vars["stt_url"].set("https://example.test/v1/audio/transcriptions")
-ui._stt_changed()
+ui.stt.vars["stt_url"].set("https://example.test/v1/audio/transcriptions")
+ui.stt._changed()
 check("хаяг хадгалагдсан", app.cfg["stt_url"], "https://example.test/v1/audio/transcriptions")
-ui.stt_var.set("Google (үнэгүй, түлхүүргүй)")
-ui._stt_selected()
+ui.stt.provider_var.set("Google (үнэгүй, түлхүүргүй)")
+ui.stt._selected()
 root.update()
-check("буцаад нуугдсан", shown(ui.stt_extra), False)
+check("буцаад нуугдсан", shown(ui.stt.extra), False)
 check("буцаад google болсон", app.cfg["stt_provider"], "google")
 
 # --- Sidebar хумих ---
@@ -298,6 +357,33 @@ check(
     [name for _, name in NAV],
     ["Төлөв", "Яриа", "Бичилт", "Товчлуур", "Толь", "Түүх", "Нэмэлт"],
 )
+
+# --- Гүйлгэгч гарч ирэхэд агуулгын өргөн хэлбэлзэхгүй ---
+# Урт тайлбартай мөр нэмэхэд өмнө нь цонх хоёр өргөний хооронд төгсгөлгүй
+# эргэлдэж гацдаг байв: гүйлгэгч зай эзэлж → агуулга нарийсч → тайлбар нэмэлт
+# мөрөнд шилжиж → агуулга уртсаж → гүйлгэгч хэрэгтэй хэвээр. `place`-ээр
+# давхарласны дараа өргөн нь гүйлгэгчээс хамаарахаа болих ёстой.
+from monspeech.widgets import Card  # noqa: E402 - Tk шалгасны дараа
+
+page = ui.pages[6]
+before = page.body.winfo_width()
+card = Card(page.body)
+for index in range(12):
+    card.row(
+        f"Урт тайлбартай мөр {index}",
+        "Энэ бол зориуд урт тайлбар: гүйлгэгч гарч ирэхэд мөр таслалт нь "
+        "өөрчлөгдөж, агуулгын өндөр солигдох ёстой байсан тохиолдлыг дуурайна.",
+    )
+root.update()
+check("гүйлгэгч хэрэгтэй болсон", page._bar_shown, True)
+check("агуулгын өргөн хэвээр", page.body.winfo_width(), before)
+
+# Хэд дахин update хийхэд ч тогтвортой — эргэлдэж байвал энд өөрчлөгдөнө
+widths = set()
+for _ in range(5):
+    root.update()
+    widths.add(page.body.winfo_width())
+check("давтан update-д тогтвортой", len(widths), 1)
 
 root.destroy()
 

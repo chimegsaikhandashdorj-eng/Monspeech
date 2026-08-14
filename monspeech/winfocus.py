@@ -125,6 +125,24 @@ def foreground_window():
         return None
 
 
+def match_marker(title: str, markers) -> str | None:
+    """Гарчигт таарах ЭХНИЙ тэмдгийг буцаана, эс бөгөөс `None`.
+
+    Тэмдэг нь гарчгийн ХЭСЭГ («Visual Studio Code») — бүтэн гарчиг нь засаж
+    буй файлын нэрээс хамаарч байнга солигддог тул бүтнээр нь тааруулах
+    утгагүй. Том/жижиг үсэг ялгахгүй.
+
+    Цэвэр функц: цонхны системд огт хандахгүй тул шууд тестлэнэ.
+    """
+    title = (title or "").lower()
+    if not title:
+        return None
+    for marker in markers:
+        if marker and str(marker).lower() in title:
+            return marker
+    return None
+
+
 def window_title(hwnd) -> str:
     try:
         buf = ctypes.create_unicode_buffer(512)

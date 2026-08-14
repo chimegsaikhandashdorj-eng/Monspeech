@@ -88,13 +88,24 @@ class FakeInjector:
         self.calls.append((text, restore, backspaces, mode))
 
 
+#: Дамжлагад хэрэгтэй тохиргооны түлхүүрүүд. Тест бүр үүнээс хазайхыг нь л
+#: дурдана — шинэ түлхүүр нэмэхэд нэг л газар засна.
+BASE_CFG = {
+    "min_confidence": 0.45,
+    "restore_clipboard": True,
+    "clean_speech": True,
+    "detect_language": False,  # тусад нь асаагаад шалгана
+    "lang_alt": "en-US",
+}
+
+
 def build(answers, cfg=None, formatter=None):
     injector = FakeInjector()
     pipeline.injector = injector  # бодит оруулагчийг түр солино
     worker = RecognitionWorker(
         segments=queue.Queue(),
         events=queue.Queue(),
-        cfg=cfg or {"min_confidence": 0.45, "restore_clipboard": True, "clean_speech": True},
+        cfg=cfg or dict(BASE_CFG),
         recognizer=FakeRecognizer(answers),
         formatter=formatter or Formatter(),
         stats=FakeStats(),
@@ -185,7 +196,7 @@ check("чигчлүүрт текст ороогүй", injector.calls, [])
 # --- Цэвэрлэгээ унтраалттай бол хэлсэн чигээрээ ---
 worker, injector = build(
     [(["за ааа маргааш уулзъя"], 0.9)],
-    cfg={"min_confidence": 0.45, "restore_clipboard": True, "clean_speech": False},
+    cfg={**BASE_CFG, "clean_speech": False},
 )
 worker._handle(SPEECH, "mn-MN")
 check("унтраалттай бол хэвээр", injector.calls[0][0], "За ааа маргааш уулзъя ")
@@ -207,6 +218,41 @@ check("толиор сонгосон хувилбар", injector.calls[0][0], "C
 worker, injector = build([(["нэг хоёр", "гурав дөрөв"], 0.9)])
 worker._handle(SPEECH, "mn-MN")
 check("нотолгоогүй бол эхнийх нь", injector.calls[0][0], "Нэг хоёр ")
+
+# --- Хэл сэжиглэх: итгэлцэл бага + кирилл биш бол хоёрдогч хэлээр дахин ---
+DETECT = {**BASE_CFG, "detect_language": True}
+
+worker, injector = build([(["hello world"], 0.2), (["hello world"], 0.95)], cfg=DETECT)
+worker._handle(SPEECH, "mn-MN")
+check("хоёр хэлээр асуусан", worker.recognizer.langs, ["mn-MN", "en-US"])
+check("англи үр дүн орсон", injector.calls[0][0], "Hello world ")
+
+# Итгэлцэл өндөр бол огт хөндөхгүй
+worker, injector = build([(["hello world"], 0.9)], cfg=DETECT)
+worker._handle(SPEECH, "mn-MN")
+check("итгэлтэй бол дахин асуухгүй", worker.recognizer.langs, ["mn-MN"])
+
+# Кирилл гарсан бол хөндөхгүй — итгэлцэл бага ч гэсэн
+worker, injector = build([(["магадгүй"], 0.1)], cfg=DETECT)
+worker._handle(SPEECH, "mn-MN")
+check("кирилл бол дахин асуухгүй", worker.recognizer.langs, ["mn-MN"])
+
+# Дахилт нь илүү итгэлтэй биш бол анхны үр дүн хэвээр
+worker, injector = build([(["hello"], 0.3), (["hi"], 0.1)], cfg=DETECT)
+worker._handle(SPEECH, "mn-MN")
+check("дахилт муу бол анхныхаа хэвээр", drain(worker.events)[1], ("empty", "low_confidence"))
+
+# Дахилт унавал танилт бүхэлдээ уначихгүй
+worker, injector = build(
+    [(["hello"], 0.2), RecognitionError("сүлжээ таслав")], cfg=DETECT
+)
+worker._handle(SPEECH, "mn-MN")
+check("дахилт унасан ч алдаа болоогүй", drain(worker.events)[1], ("empty", "low_confidence"))
+
+# Унтраалттай бол огт дахин асуухгүй
+worker, injector = build([(["hello world"], 0.2)], cfg=BASE_CFG)
+worker._handle(SPEECH, "mn-MN")
+check("унтраалттай бол нэг л удаа", worker.recognizer.langs, ["mn-MN"])
 
 # --- Оруулах үед гарсан алдаа аппыг унагахгүй ---
 worker, injector = build([(["тест"], 0.9)])
