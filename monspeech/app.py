@@ -11,27 +11,30 @@
 from __future__ import annotations
 
 import ctypes
+import platform
 import queue
 import subprocess
 import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 
-from . import autostart
+import pyperclip
+
+from . import __version__, autostart, recognizer, update, winfocus
 from .audio import MIN_THRESHOLD, Recorder
 from .config import Config
 from .history import InsertionHistory
 from .hotkeys import HotkeyManager, parse_combo, pretty
 from .instance import ShowListener, already_running, request_show
-from .logging_setup import LOG_PATH, get as get_logger
+from .logging_setup import LOG_PATH, get as get_logger, install_crash_handler
 from .overlay import WaveOverlay
 from .pipeline import RecognitionWorker
-from .recognizer import Recognizer
 from .store import TranscriptStore, UsageStats
 from .textproc import Formatter, learn_corrections, parse_replacements
 from .tray import Tray
-from .window import CODE_TO_NAME, ControlWindow
+from .window import CODE_TO_NAME, ControlWindow, unknown_language_codes
 from .winfocus import TargetWindow, activate
 
 log = get_logger("app")
@@ -70,7 +73,11 @@ class MonspeechApp:
             replacements=self.cfg["replacements"],
             snippets=self.cfg["snippets"],
         )
-        self.recognizer = Recognizer(lang=self.cfg["lang"])
+        # Өмнөх ажиллагааны түүхээр үрээнэ — эс бөгөөс хувилбар сонгох жин
+        # апп нээх бүрд тэгээс эхэлнэ.
+        for entry in self.transcripts.entries:
+            self.formatter.remember(str(entry.get("text") or ""))
+        self.recognizer = recognizer.create(self.cfg)
         self.target = TargetWindow()
         self.recorder = Recorder(
             on_segment=self._on_segment,
@@ -122,10 +129,25 @@ class MonspeechApp:
         self._refresh_status()
         self.root.after(50, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Цонхны callback дотор гарсан алдааг Tk нь консол руу бичээд өнгөрдөг —
+        # `.exe`-д консол байхгүй тул мөрдөх юм үлдэхгүй болно
+        self.root.report_callback_exception = self._on_tk_exception
         # Аппыг гараар нээсэн бол хүн удирдлагын самбарыг харахыг хүсэж байна
         self.root.after(0, self.show_window)
         self.recognizer.prewarm_async()
+        if self.cfg["check_updates"]:
+            update.check_async(
+                __version__, lambda tag: self.events.put(("update", tag))
+            )
         log.info("апп эхэллээ (хэл=%s)", self.cfg["lang"])
+
+    def _on_tk_exception(self, kind, value, trace) -> None:
+        """Цонхны алдаа — логлоод үргэлжилнэ (апп бүхэлдээ унах ёсгүй)."""
+        log.critical("цонхны алдаа", exc_info=(kind, value, trace))
+        try:
+            self.ui.set_detail("Цонхонд алдаа гарлаа — дэлгэрэнгүйг логоос үзнэ үү.")
+        except Exception:  # noqa: BLE001 — алдаа мэдээлэх үедээ дахин унахгүй
+            pass
 
     def _set_window_icon(self) -> None:
         from pathlib import Path
@@ -186,6 +208,7 @@ class MonspeechApp:
             "recognized": self._on_recognized,
             "pending": self._on_pending,
             "empty": lambda reason: self._handle_empty(str(reason)),
+            "update": lambda tag: self.ui.show_update(str(tag)),
             "error": lambda message: self._fail(str(message)),
             "audio_error": self._on_audio_failure,
             "undo": lambda _: self.undo_last(),
@@ -248,11 +271,11 @@ class MonspeechApp:
         """Юу ч танигдаагүйг хэрэглэгчид мэдэгдэнэ (чимээгүй бүтэлгүйтэхгүй)."""
         if self.listening or self._pending:
             return  # урт ярианы дунд бол чимээгүй өнгөрнө
-        message = (
-            "Итгэлтэй таньж чадсангүй — дахин хэлнэ үү"
-            if reason == "low_confidence"
-            else "Таньж чадсангүй — дахин хэлнэ үү"
-        )
+        messages = {
+            "low_confidence": "Итгэлтэй таньж чадсангүй — дахин хэлнэ үү",
+            "filler": "Зөвхөн чигчлүүр үг сонсогдлоо",
+        }
+        message = messages.get(reason, "Таньж чадсангүй — дахин хэлнэ үү")
         self.ui.set_detail(message)
         if self.cfg["wave_overlay"]:
             self.overlay.flash(message, kind="warning")
@@ -296,6 +319,43 @@ class MonspeechApp:
         except OSError as exc:
             self.ui.set_detail(f"Лог нээгдсэнгүй: {exc}")
 
+    def open_releases(self) -> None:
+        try:
+            webbrowser.open(update.RELEASES_URL)
+        except OSError as exc:  # хөтөч байхгүй байж болно
+            self.ui.set_detail(f"Хөтөч нээгдсэнгүй: {exc}")
+
+    def diagnostics(self) -> str:
+        """Алдаа мэдээлэхэд хавсаргах товч мэдээлэл.
+
+        Хэрэглэгчийн ярианы текст, API түлхүүр энд ОРОХГҮЙ — хэн нэгэн рүү
+        зүгээр хуулж явуулж болохуйц байх ёстой.
+        """
+        provider = self.cfg["stt_provider"]
+        lines = [
+            f"Monspeech {__version__}",
+            f"Windows {platform.version()} ({platform.machine()})",
+            f"Python {sys.version.split()[0]}"
+            + (" (багцалсан)" if getattr(sys, "frozen", False) else ""),
+            f"Танигч: {provider}" + (" (өөрийн хаягтай)" if self.cfg["stt_url"] else ""),
+            f"Хэл: {self.cfg['lang']} / {self.cfg['lang_alt']}",
+            f"Микрофон: {self.cfg['mic_index']}",
+            f"Толь: {len(self.cfg['replacements'])} үг, {len(self.cfg['snippets'])} товчлол",
+            f"Лог: {LOG_PATH}",
+        ]
+        return "\n".join(lines)
+
+    def copy_diagnostics(self) -> str:
+        try:
+            pyperclip.copy(self.diagnostics())
+        except pyperclip.PyperclipException as exc:
+            return f"Хуулж чадсангүй: {exc}"
+        return "Мэдээллийг хууллаа — алдаа мэдээлэхдээ буулгана уу."
+
+    def finish_onboarding(self) -> None:
+        self.cfg["onboarded"] = True
+        self.cfg.save()
+
     # ------------------------------------------------------------------
     # Цонхноос ирэх өөрчлөлтүүд
     # ------------------------------------------------------------------
@@ -315,6 +375,42 @@ class MonspeechApp:
         self.ui.set_detail(
             f"{pretty(self.cfg['ptt_key_alt'])}: {CODE_TO_NAME.get(code, code)}"
         )
+
+    def on_stt_changed(self, values: dict[str, str]) -> None:
+        """Танигчийн тохиргоо солигдлоо — хуучныг хааж, шинийг нь босгоно.
+
+        Ажлын thread нь `self.recognizer`-ыг зөвхөн уншдаг тул солих нь аюулгүй:
+        сая эхэлсэн таних ажил хуучин объектоороо дуусаад, дараагийнх нь
+        шинийг ашиглана.
+        """
+        for key, value in values.items():
+            self.cfg[key] = value
+        previous = self.recognizer
+        self.recognizer = recognizer.create(self.cfg)
+        try:
+            previous.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("хуучин танигчийг хаахад алдаа: %s", exc)
+        self.worker.recognizer = self.recognizer
+        self.recognizer.prewarm_async()
+        self.cfg.save()
+        title = dict(recognizer.titles()).get(
+            self.cfg["stt_provider"], self.cfg["stt_provider"]
+        )
+        log.info("танигч солигдлоо: %s", self.cfg["stt_provider"])
+        self.ui.set_detail(f"Танигч: {title}")
+
+    def on_theme_changed(self, code: str) -> None:
+        """Өнгөний сэдэв солигдлоо.
+
+        Шууд хэрэглэж чадахгүй: виджетүүд өнгөө импортын үед анхны утга болгон
+        авдаг тул зөвхөн дахин эхлүүлэхэд идэвхжинэ. Үүнийг шулуун хэлнэ —
+        сольсон мөртлөө юу ч болохгүй бол хэрэглэгч эвдэрсэн гэж бодно.
+        """
+        self.cfg["theme"] = code
+        self.cfg.save()
+        log.info("сэдэв солигдлоо: %s (дахин эхлүүлэхэд идэвхжинэ)", code)
+        self.ui.set_detail("Сэдэв хадгалагдлаа — дахин эхлүүлэхэд идэвхжинэ.")
 
     def on_mic_changed(self, index: int) -> None:
         self.cfg["mic_index"] = index
@@ -374,15 +470,26 @@ class MonspeechApp:
             self.recorder.max_seconds = float(value)
         self.cfg.save()
 
+    def _match_window(self, markers) -> str | None:
+        """Идэвхтэй цонхны гарчигт таарах эхний тэмдэг."""
+        return winfocus.match_marker(self.target.title(), markers)
+
     def _insert_mode(self) -> str:
         """Энэ цонхонд clipboard ажилладаггүй бол шууд бичих горимд шилжинэ."""
         if self.cfg["type_mode"]:
             return "type"
-        title = (self.target.title() or "").lower()
-        for marker in self.cfg["type_mode_apps"]:
-            if marker and marker.lower() in title:
-                return "type"
-        return "paste"
+        return "type" if self._match_window(self.cfg["type_mode_apps"]) else "paste"
+
+    def _window_lang(self) -> str:
+        """Идэвхтэй цонхонд тохирсон хэл, эс бөгөөс үндсэн хэл.
+
+        Cursor дээр англиар, Messenger дээр монголоор бичдэг хүн товчлуураа
+        сольж санахаа болино — цонх нь өөрөө хэлээ хэлнэ.
+        """
+        marker = self._match_window(self.cfg["lang_apps"])
+        if marker is None:
+            return str(self.cfg["lang"])
+        return str(self.cfg["lang_apps"].get(marker) or self.cfg["lang"])
 
     def remember_type_mode_app(self) -> str:
         """Одоогийн цонхыг "шууд бичих" жагсаалтад нэмнэ."""
@@ -404,6 +511,22 @@ class MonspeechApp:
         self.formatter.set_snippets(mapping)
         self.cfg.save()
         self.ui.set_detail(f"{len(mapping)} товчлол хадгалагдлаа.")
+        return len(mapping)
+
+    def on_lang_apps_changed(self, raw: str) -> int:
+        """Аппаар ялгах хэлний хүснэгт солигдлоо.
+
+        Танихгүй хэлний кодыг чимээгүй хаяхгүй — хэрэглэгч бичсэн зүйл нь
+        ажиллахгүй бол шалтгааныг нь хэлнэ.
+        """
+        mapping = parse_replacements(raw)
+        unknown = unknown_language_codes(mapping)
+        self.cfg["lang_apps"] = mapping
+        self.cfg.save()
+        if unknown:
+            self.ui.set_detail(f"Танихгүй хэлний код: {', '.join(unknown)}")
+        else:
+            self.ui.set_detail(f"{len(mapping)} аппын хэл хадгалагдлаа.")
         return len(mapping)
 
     def on_transcript_corrected(self, entry: dict, corrected: str) -> str:
@@ -538,7 +661,9 @@ class MonspeechApp:
             return
         # Товч дарсан агшны цонх бол текст очих ёстой цонх
         self.target.remember(skip=int(self.root.winfo_id()) if self.root.winfo_exists() else None)
-        self._active_lang = lang or self.cfg["lang"]
+        # Хоёрдогч товчлуураар шууд заасан хэл нь аппын профайлаас дээгүүр —
+        # хэрэглэгч зориуд дарсан бол түүнийг нь дийлэхгүй.
+        self._active_lang = lang or self._window_lang()
         self.recorder.max_seconds = float(self.cfg["max_recording_seconds"])
         self.recorder.segmenter.silence_hold = float(self.cfg["silence_hold"])
         error = self.recorder.start()
@@ -653,6 +778,7 @@ def _key_label(key: str) -> str:
 
 
 def main() -> int:
+    install_crash_handler()
     if already_running():
         # Хоёр дахь хуулбар нээхгүй — ажиллаж байгаа цонхыг нь урд нь гаргана
         if request_show():

@@ -12,6 +12,7 @@ dist/
 
 # Зөвхөн энэ компьютерт хамаарах тохиргоо
 .claude/settings.local.json
+skills-lock.json
 
 # Засварлагчийн түр файлууд
 .vscode/

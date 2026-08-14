@@ -20,6 +20,7 @@ from tkinter import ttk
 from . import __version__, icons, textproc, theme
 from .hotkeys import pretty
 from .orb import RobotOrb
+from .stt_settings import SttCard
 from .widgets import (
     Button,
     Card,
@@ -35,6 +36,7 @@ from .widgets import (
     Slider,
     StatTile,
     Toggle,
+    combo,
     scrollbar,
 )
 
@@ -48,6 +50,15 @@ LANGUAGES = [
     ("中文", "zh-CN"),
 ]
 CODE_TO_NAME = {code: name for name, code in LANGUAGES}
+
+
+def unknown_language_codes(mapping: dict[str, str]) -> list[str]:
+    """Аппын хэлний хүснэгтээс аппын мэдэхгүй кодуудыг эрэмбэлж буцаана.
+
+    Хэрэглэгч «en» гэж бичвэл (зөв нь «en-US») чимээгүй ажиллахгүй байхаас
+    илүү шалтгааныг нь хэлэх нь дээр.
+    """
+    return sorted({code for code in mapping.values() if code not in CODE_TO_NAME})
 NAME_TO_CODE = dict(LANGUAGES)
 
 # «Төлөв» хуудасны хурдан сэлгэх чипүүд — бүтэн жагсаалт нь «Яриа» цэст
@@ -72,6 +83,8 @@ WRITING_TOGGLES = [
      "Шинэ өгүүлбэрийн эхний үсгийг том болгоно"),
     ("voice_punctuation", "Дуут цэг таслал",
      "«цэг», «таслал», «шинэ мөр» гэж хэлэхэд тэмдэг болгоно"),
+    ("clean_speech", "Чигчлүүр цэвэрлэх",
+     "«ааа», эхний «за», давхардсан үг, «үгүй ээ» гэж зассаныг хасна"),
 ]
 MODE_TOGGLES = [
     ("ptt_enabled", "Push-to-talk горим",
@@ -133,6 +146,10 @@ SEARCH_INDEX = [
     ("Хаахад tray руу нуух", 6, "tray хаах нуух"),
     ("Лог ба хувилбар", 6, "лог хувилбар version log"),
 ]
+
+#: Сэдвийн тохиргооны нэр → цонхонд харагдах нэр.
+THEME_NAMES = {"dark": "Харанхуй", "light": "Гэрэлтэй"}
+THEME_CODES = {title: code for code, title in THEME_NAMES.items()}
 
 ORB_MODES = {"listening": "listening", "working": "recognizing"}
 LEVEL_FULL = 3200.0  # энэ RMS-ийг 100% гэж үзнэ
@@ -414,6 +431,9 @@ class ControlWindow:
         self.orb.start() if index == 0 else self.orb.stop()
 
     def _bind_keys(self) -> None:
+        # Цонхны түвшинд холбоно. Tk-ийн `Entry` класс нь Ctrl+товчлуурт
+        # ерөнхий холбоостой ч тэр нь эдгээрийг залгидаггүй — курсор хайлт,
+        # түлхүүрийн талбарт байхад ч навигац ажиллана (тестээр баталсан).
         for number in range(1, 8):
             self.root.bind(f"<Control-Key-{number}>", lambda _e, n=number: self.select(n - 1))
         self.root.bind("<Control-f>", lambda _e: self._focus_search())
@@ -435,6 +455,7 @@ class ControlWindow:
             Page(self.stack, "Төлөв", aside=f"{pretty(self.app.cfg['ptt_key'])} дарж барин ярь")
         )
 
+        self._welcome_card(page)
         hero = Card(page.body)
         inner = tk.Frame(hero.body, bg=theme.PANEL)
         inner.pack(pady=(10, 16))
@@ -502,6 +523,62 @@ class ControlWindow:
         page.spacer()
         self.refresh_stats()
 
+    def _welcome_card(self, page) -> None:
+        """Анх ажиллуулахад л гарах гурван алхамт танилцуулга.
+
+        Дараалал нь санаатай: микрофон ажиллахгүй бол хэл, товчлуур хоёр
+        утгагүй; хэлээ сонгоогүй бол товч дарахад буруу хэлээр танина. Тиймээс
+        микрофон → хэл → товчлуур. Эхний хоёр нь «Яриа» хуудас руу үсэрнэ,
+        гурав дахийг нь хэрэглэгч байгаа газраа туршина.
+
+        Аппын гол санаа нь цонх огт нээхгүйгээр ажиллах явдал тул төгсгөлд нь
+        цонхыг хаах нь аппыг зогсоохгүй гэдгийг сануулна. Дараа нь дахин
+        гарахгүй.
+        """
+        self.welcome = None
+        if self.app.cfg["onboarded"]:
+            return
+
+        card = Card(page.body)
+        self.welcome = card
+
+        names, _ = self.app.list_microphones()
+        # Эхний нэр нь үргэлж «Системийн үндсэн» тул жинхэнэ төхөөрөмж
+        # илэрсэн эсэхийг үлдсэнээр нь мэднэ.
+        found = len(names) - 1
+        _, holder = card.row(
+            "1. Микрофон",
+            f"{found} төхөөрөмж илэрлээ" if found else "Төхөөрөмж илрээгүй — залгаад шалгана уу",
+        )
+        Button(holder, "Сонгох", lambda: self.select(1)).pack()
+
+        _, holder = card.row(
+            "2. Ярих хэл",
+            f"Одоо: {CODE_TO_NAME.get(self.app.cfg['lang'], self.app.cfg['lang'])}",
+        )
+        Button(holder, "Солих", lambda: self.select(1)).pack()
+
+        combo = pretty(self.app.cfg["ptt_key"])
+        card.row(
+            f"3. {combo} дарж бариад ярь",
+            "Курсороо текст бичих цонхон дээр тавиад тушаа — товчоо тавимагц шивэгдэнэ",
+        )
+
+        # Дугаарлаагүй: гурван алхмын дараах нэмэлт мэдээлэл. Хэрэглэгч анхны
+        # танигчийн хязгаарыг ЭНД мэдэж байвал тасалдах өдөр гайхахгүй.
+        _, holder = card.row("Танигч", "Анхныхаа нийтлэг түлхүүр — хааяа тасалдана")
+        Button(holder, "Үзэх", lambda: self.select(1)).pack()
+
+        _, holder = card.row("Аппын цонх хэрэггүй", "Хаавал цагны хажууд үлдэнэ")
+        Button(holder, "Ойлголоо", self._finish_welcome).pack()
+
+    def _finish_welcome(self) -> None:
+        self.app.finish_onboarding()
+        if self.welcome is not None:
+            self.welcome.destroy()
+            self.welcome = None
+        self.set_detail("Амжилттай! Дахиад хэрэгтэй бол README-г үзнэ үү.")
+
     def _tiles_resized(self, event) -> None:
         """Нарийн цонхонд 4 картыг нэг эгнээнд багтаахад кирилл шошго таслагдана."""
         self._layout_tiles(4 if event.width >= TILE_ROW_MIN else 2)
@@ -551,7 +628,7 @@ class ControlWindow:
         self.lang_var = tk.StringVar(
             value=CODE_TO_NAME.get(self.app.cfg["lang"], LANGUAGES[0][0])
         )
-        self._combo(holder, self.lang_var, [n for n, _ in LANGUAGES], self._lang_changed)
+        combo(holder, self.lang_var, [n for n, _ in LANGUAGES], self._lang_changed)
 
         _, holder = card.row(
             "Хоёр дахь хэл",
@@ -560,7 +637,7 @@ class ControlWindow:
         self.alt_lang_var = tk.StringVar(
             value=CODE_TO_NAME.get(self.app.cfg["lang_alt"], LANGUAGES[1][0])
         )
-        self._combo(
+        combo(
             holder, self.alt_lang_var, [n for n, _ in LANGUAGES],
             lambda: self.app.on_alt_lang_changed(NAME_TO_CODE[self.alt_lang_var.get()]),
         )
@@ -568,7 +645,7 @@ class ControlWindow:
         _, holder = card.row("Микрофон", "Системийн үндсэн төхөөрөмжийг дагана")
         self.mic_names, self.mic_indexes = self.app.list_microphones()
         self.mic_var = tk.StringVar(value=self._current_mic_name())
-        self._combo(holder, self.mic_var, self.mic_names, self._mic_changed)
+        combo(holder, self.mic_var, self.mic_names, self._mic_changed)
 
         _, holder = card.row("Оролтын түвшин", "Ярихад баганууд хөдөлж байвал зөв")
         self.meter = LevelMeter(holder)
@@ -580,23 +657,23 @@ class ControlWindow:
         ).pack(side="left", padx=(9, 0))
 
         _, holder = card.row(
+            "Хэл сэжиглэх", "Эргэлзвэл хоёрдогч хэлээр дахин шалгана"
+        )
+        self._toggle(holder, "detect_language")
+
+        _, holder = card.row(
             "Долгион харуулах", "Курсорын доорх капсул дээр 9 багана"
         )
         self._toggle(holder, "wave_overlay")
-        page.spacer()
+
+        self.stt = SttCard(page, self.app.cfg, self.app.on_stt_changed)
+
+    def _theme_changed(self) -> None:
+        self.app.on_theme_changed(THEME_CODES.get(self.theme_var.get(), "dark"))
 
     def _lang_changed(self) -> None:
         self.app.on_lang_changed(NAME_TO_CODE[self.lang_var.get()])
         self._paint_lang_chips()
-
-    def _combo(self, parent, variable, values, command) -> ttk.Combobox:
-        box = ttk.Combobox(
-            parent, textvariable=variable, values=values, state="readonly",
-            style="Mon.TCombobox", width=22,
-        )
-        box.pack()
-        box.bind("<<ComboboxSelected>>", lambda _e: command())
-        return box
 
     def _toggle(self, parent, key: str) -> Toggle:
         toggle = Toggle(
@@ -609,7 +686,7 @@ class ControlWindow:
 
     def _option_changed(self, key: str, value: bool) -> None:
         self.app.on_option_changed(key, value)
-        if key in ("auto_capitalize", "auto_space", "voice_punctuation"):
+        if key in ("auto_capitalize", "auto_space", "voice_punctuation", "clean_speech"):
             self._refresh_preview()
 
     # --- 3. Бичилт --------------------------------------------------
@@ -644,9 +721,15 @@ class ControlWindow:
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
+        """Жишээ өгүүлбэр: «за ааа өнөөдрийн хурал 3 цагт болно цэг» гэж хэлсэн гэж үзнэ."""
         cfg = self.app.cfg
-        text = "Өнөөдрийн" if cfg["auto_capitalize"] else "өнөөдрийн"
-        text += " хурал 3 цагт болно" + ("." if cfg["voice_punctuation"] else "")
+        text = "өнөөдрийн хурал 3 цагт болно"
+        if not cfg["clean_speech"]:
+            text = "за ааа " + text  # цэвэрлэхгүй бол хэлсэн чигээрээ
+        if cfg["voice_punctuation"]:
+            text += "."
+        if cfg["auto_capitalize"]:
+            text = text[0].upper() + text[1:]
         self.preview_var.set(("␣" if cfg["auto_space"] else "") + text)
 
     def _remember_type_mode_app(self) -> None:
@@ -687,7 +770,7 @@ class ControlWindow:
             Page(self.stack, "Толь", "Аппыг өөрийн нэр томьёо, хэллэгт сургана.")
         )
         tabs = SegmentedTabs(
-            page.body, ["Үг солих", "Дуут товчлол"], self._dictionary_tab
+            page.body, ["Үг солих", "Дуут товчлол", "Аппын хэл"], self._dictionary_tab
         )
         tabs.pack(anchor="w", padx=theme.PAGE_PAD_X, pady=(0, theme.GAP))
 
@@ -695,16 +778,32 @@ class ControlWindow:
         self.pairs = PairEditor(page.body, self._dictionary_changed)
         self.pairs.pack(fill="x", padx=theme.PAGE_PAD_X, pady=(0, theme.GAP))
         self.pairs.load(self.app.cfg["replacements"])
+        self.dictionary_note = tk.Label(
+            page.body, text="", bg=theme.BG, fg=theme.DIM, font=theme.UI_SMALL,
+            anchor="w", justify="left", wraplength=560,
+        )
+        self.dictionary_note.pack(fill="x", padx=theme.PAGE_PAD_X)
         page.spacer()
+
+    #: Толины таб бүр: (зүүн шошго, баруун шошго, тохиргооны түлхүүр, тайлбар).
+    DICTIONARY_TABS = (
+        ("Буруу таньсан", "Зөв бичих", "replacements", ""),
+        ("Хэллэг", "Бүтэн текст", "snippets", ""),
+        (
+            "Цонхны нэрний хэсэг",
+            "Хэлний код",
+            "lang_apps",
+            "Тухайн цонхонд ярихад энэ хэлээр танина. Жишээ: «Visual Studio Code» → "
+            "en-US. Хоёрдогч товчлуураар заасан хэл үүнээс дээгүүр.",
+        ),
+    )
 
     def _dictionary_tab(self, index: int) -> None:
         self.dictionary_tab = index
-        if index == 0:
-            self.pairs.set_labels(("Буруу таньсан", "Зөв бичих"))
-            self.pairs.load(self.app.cfg["replacements"])
-        else:
-            self.pairs.set_labels(("Хэллэг", "Бүтэн текст"))
-            self.pairs.load(self.app.cfg["snippets"])
+        left, right, key, note = self.DICTIONARY_TABS[index]
+        self.pairs.set_labels((left, right))
+        self.pairs.load(self.app.cfg[key])
+        self.dictionary_note.configure(text=note)
 
     def _dictionary_changed(self, mapping: dict) -> None:
         """Товч дарах бүрт диск рүү бичихгүй — бичиж дуустал хүлээнэ."""
@@ -722,8 +821,10 @@ class ControlWindow:
         raw = textproc.format_replacements(mapping)
         if self.dictionary_tab == 0:
             self.app.on_replacements_changed(raw)
-        else:
+        elif self.dictionary_tab == 1:
             self.app.on_snippets_changed(raw)
+        else:
+            self.app.on_lang_apps_changed(raw)
 
     # --- 6. Түүх ----------------------------------------------------
     def _page_history(self) -> None:
@@ -744,8 +845,10 @@ class ControlWindow:
         holder.pack(fill="both", expand=True, padx=theme.PAGE_PAD_X)
         self.history_box = tk.Listbox(
             holder.inner, bg=theme.PANEL, fg=theme.TEXT, selectbackground=theme.NAV_ACTIVE,
-            selectforeground=theme.TEXT, highlightthickness=0, relief="flat",
+            selectforeground=theme.TEXT, relief="flat",
             font=theme.UI, activestyle="none", height=12, bd=0,
+            highlightthickness=theme.FOCUS_WIDTH,
+            highlightbackground=theme.PANEL, highlightcolor=theme.FOCUS,
         )
         bar = scrollbar(holder.inner, self.history_box.yview, trough=theme.PANEL)
         bar.pack(side="right", fill="y")
@@ -799,15 +902,41 @@ class ControlWindow:
             slider.pack()
             self.sliders[key] = slider
 
+        page.group("Харагдац")
+        card = Card(page.body)
+        _, holder = card.row("Өнгөний сэдэв", "Дахин эхлүүлэхэд идэвхжинэ")
+        self.theme_var = tk.StringVar(value=THEME_NAMES.get(theme.name, THEME_NAMES["dark"]))
+        combo(
+            holder, self.theme_var, list(THEME_NAMES.values()), self._theme_changed
+        )
+
         page.group("Систем")
         card = Card(page.body)
         _, holder = card.row("Windows-тай хамт эхлүүлэх", "Нэвтэрмэгц дэвсгэрт ажиллана")
         self._toggle(holder, "start_with_windows")
         _, holder = card.row("Хаахад tray руу нуух", "Хаах товч дарахад аппыг зогсоохгүй")
         self._toggle(holder, "tray_enabled")
-        _, holder = card.row("Лог ба хувилбар", f"Monspeech {__version__} · Windows")
-        Button(holder, "Логийн хавтас", self.app.open_log).pack()
+        _, holder = card.row("Шинэчлэл шалгах", "Эхлэхдээ GitHub-аас нэг удаа")
+        self._toggle(holder, "check_updates")
+
+        # Тайлбар нь амьд: шинэчлэл олдоход текст нь солигдоно.
+        self.version_var = tk.StringVar(value=f"Monspeech {__version__} · Windows")
+        _, holder = card.row("Хувилбар", self.version_var)
+        self.update_button = Button(holder, "Шинэчлэл авах", self.app.open_releases)
+
+        _, holder = card.row("Алдаа мэдээлэх", "Орчны мэдээлэл ба лог")
+        Button(holder, "Логийн хавтас", self.app.open_log).pack(side="left", padx=(0, 6))
+        Button(holder, "Мэдээлэл хуулах", self._copy_diagnostics).pack(side="left")
         page.spacer()
+
+    def _copy_diagnostics(self) -> None:
+        self.set_detail(self.app.copy_diagnostics())
+
+    def show_update(self, tag: str) -> None:
+        """Шинэ хувилбар олдлоо — «Нэмэлт» хуудсанд товч гаргана."""
+        self.version_var.set(f"Monspeech {__version__} · шинэ хувилбар: {tag}")
+        self.update_button.pack()
+        self.set_detail(f"Шинэ хувилбар гарсан байна: {tag}")
 
     # ------------------------------------------------------------------
     # Гаднаас дуудагдах

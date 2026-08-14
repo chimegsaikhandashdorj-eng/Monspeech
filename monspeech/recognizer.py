@@ -1,187 +1,178 @@
-"""Google Web Speech рүү шууд хандах (хөтөчгүйгээр).
+"""Танигчийн залгуур: нийтлэг интерфейс ба сонголт.
 
-Chromium-ийн ашигладаг нээлттэй эндпойнт рүү түүхий PCM дуу илгээнэ.
-Холболтыг урьдчилан нээж тавьдаг тул товч суллагдмагц зөвхөн дуу л явна.
+Апп нэг л зүйл мэднэ — «дуу өгөхөд хувилбарууд буцаадаг объект». Түүний ард
+Google байна уу, хэрэглэгчийн өөрийн үйлчилгээ байна уу гэдэг нь энэ файлаас
+цааш харагдахгүй.
+
+Яагаад залгуур хэрэгтэй вэ: анхны утга болох Google-ийн эндпойнт нь албан ёсны
+биш, SLA байхгүй, бүх хэрэглэгч нэг задгай түлхүүр дээр сууна. Ганц хэрэглэгчид
+хангалттай ч олон хүнд тараавал хязгаарлалт бүгдэд нь зэрэг цохино. Тэр өдөр
+аппыг бүхэлд нь дахин бичихгүйн тулд солих цэгийг эхнээс нь энд гаргав.
+
+Шинэ танигч нэмэх: `Provider`-оос удамшуулж `recognize()`-ыг бичээд `PROVIDERS`
+бүртгэлд нэг мөр нэмнэ. Өөр хаана ч засах шаардлагагүй — цонхны цэс, анхны утга
+руу буцах, тохиргооны нэр бүгд тэр бүртгэлээс уншина.
 """
 
 from __future__ import annotations
 
 import http.client
-import json
+import logging
 import threading
 import time
-import urllib.parse
+from collections.abc import Callable, Mapping
+from typing import Any
 
-from .logging_setup import get as get_logger
-
-log = get_logger("recognizer")
-
-HOST = "www.google.com"
-PATH = "/speech-api/v2/recognize"
-# Chromium-ийн задгай түлхүүр — бүртгэл, төлбөр шаардахгүй
-DEFAULT_KEY = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
-
-TIMEOUT = 15.0
+# Сүлжээний давхаргаас гарах алдаанууд — `OSError`-той хамт барина.
+HTTP_ERRORS = http.client.HTTPException
 
 # Түр зуурын гэж үзэх хариунууд: ачаалал ихдэх, сервер талын түр саатал.
-# 403 нь энд байхгүй — түлхүүр татгалзсан бол дахин оролдох нь утгагүй.
+# 401/403 нь энд байхгүй — түлхүүр татгалзсан бол дахин оролдох нь утгагүй.
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 # Оролдлого хоорондын хүлээлт. Нийт нэмэгдэх саатал 1.4 секундээс хэтрэхгүй.
+# Санаатай богино: ажлын thread нэг ээлжтэй тул энд удвал араас нь ирсэн
+# өгүүлбэрүүд цувж, саатал улам хуримтлагдана.
 RETRY_DELAYS = (0.4, 1.0)
+
+TIMEOUT = 15.0
 
 
 class RecognitionError(Exception):
     """Хэрэглэгчид харуулах алдаа."""
 
 
-class Recognizer:
-    """Дууг текст болгоно. Thread-ээс дуудаж болно (дотроо түгжээтэй)."""
+# Танигч бүрт ижил утгатай статусууд. Тусгайлан бичихгүй бол эдгээр хүчинтэй.
+COMMON_ERRORS: Mapping[int, str] = {
+    429: "Хэт олон хүсэлт — түр хүлээнэ үү (429).",
+}
 
-    def __init__(self, lang: str = "mn-MN", key: str = DEFAULT_KEY) -> None:
+
+def request(
+    send: Callable[[int], tuple[int, bytes]],
+    *,
+    log: logging.Logger,
+    errors: Mapping[int, str] = {},
+    on_network_error: Callable[[], None] | None = None,
+) -> bytes:
+    """Нэг хүсэлтийг дахин оролдлоготойгоор явуулж, амжилттай биеийг буцаана.
+
+    Танигч бүр зөвхөн `send(оролдлогын дугаар) -> (статус, бие)` гэсэн нэг
+    хаалт бичнэ; дахин оролдох бодлого, хүлээлт, статусыг хэрэглэгчийн хэлээр
+    алдаа болгох нь бүхэлдээ энд төвлөрнө. Ингэснээр шинэ танигч нэмэхэд
+    сүлжээний зан төлөв автоматаар ижил байна.
+
+    `errors` нь тухайн танигчид л онцгой статусууд (жишээ нь 404 хаяг олдсонгүй);
+    `COMMON_ERRORS`-той нийлж, давхцвал `errors` нь дийлнэ. Жагсаагаагүй бүх
+    200-аас өөр статус ерөнхий мэдэгдэл болно.
+
+    `on_network_error` нь сүлжээ тасрахад дуудагдана — хадгалсан холболтоо
+    хаяхад хэрэгтэй.
+
+    Сүлжээ эсвэл статусын алдаанд `RecognitionError` шиднэ.
+    """
+    attempts = len(RETRY_DELAYS) + 1
+    status, body = 0, b""
+    for attempt in range(attempts):
+        try:
+            status, body = send(attempt)
+        except (OSError, HTTP_ERRORS) as exc:
+            if on_network_error is not None:
+                on_network_error()
+            if attempt == attempts - 1:
+                raise RecognitionError(f"Сүлжээний алдаа: {exc}") from exc
+            log.warning("сүлжээний алдаа (%d/%d): %s", attempt + 1, attempts, exc)
+            time.sleep(RETRY_DELAYS[attempt])
+            continue
+
+        if status not in RETRY_STATUSES or attempt == attempts - 1:
+            break
+        log.warning(
+            "үйлчилгээ %d хариу өглөө (%d/%d) — дахин оролдож байна",
+            status, attempt + 1, attempts,
+        )
+        time.sleep(RETRY_DELAYS[attempt])
+
+    if status == 200:
+        return body
+    message = errors.get(status) or COMMON_ERRORS.get(status)
+    raise RecognitionError(message or f"Таних үйлчилгээ {status} хариу өглөө.")
+
+
+class Provider:
+    """Танигч бүрийн суурь. Дэд ангиуд `recognize()`-ыг бичнэ.
+
+    `lang` нь гаднаас солигддог (хоёр дахь хэлний товчлуур) тул энгийн талбар.
+    `prewarm`/`close` нь холболт барьдаг танигчид л утгатай — бусад нь юу ч
+    хийхгүй өвлөнө.
+    """
+
+    def __init__(self, lang: str = "mn-MN") -> None:
         self.lang = lang
-        self.key = key
-        self._lock = threading.Lock()
-        self._conn: http.client.HTTPSConnection | None = None
 
-    # ------------------------------------------------------------------
-    def _connect(self) -> http.client.HTTPSConnection:
-        conn = http.client.HTTPSConnection(HOST, timeout=TIMEOUT)
-        conn.connect()
-        return conn
+    def recognize(
+        self, pcm: bytes, rate: int = 16000, lang: str | None = None
+    ) -> tuple[list[str], float]:
+        """PCM дууг текст болгоно.
+
+        `(хувилбарууд, итгэлцэл)` хосыг буцаана. Хувилбарууд нь магадлалын
+        дарааллаар — эхнийх нь хамгийн магадлалтай. Юу ч танигдаагүй бол
+        `([], 0.0)`. Итгэлцэл өгөх боломжгүй үйлчилгээ 1.0 буцаана (шүүлтгүй
+        өнгөрнө).
+        """
+        raise NotImplementedError
 
     def prewarm(self) -> None:
-        """TLS холболтыг урьдчилан нээнэ — хариу ирэх хугацааг богиносгоно."""
-        with self._lock:
-            if self._conn is not None:
-                return
-            try:
-                self._conn = self._connect()
-            except OSError:
-                self._conn = None  # сүлжээгүй байж болно — дараа дахин оролдоно
+        """Холболтыг урьдчилан нээх боломжтой бол нээнэ."""
 
     def prewarm_async(self) -> None:
         threading.Thread(target=self.prewarm, daemon=True).start()
 
     def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except OSError:
-                    pass
-                self._conn = None
+        """Барьсан нөөцөө сулла."""
 
-    # ------------------------------------------------------------------
-    def _post(self, pcm: bytes, rate: int, reuse: bool, lang: str) -> tuple[int, bytes]:
-        if self._conn is None or not reuse:
-            if self._conn is not None:
-                try:
-                    self._conn.close()
-                except OSError:
-                    pass
-            self._conn = self._connect()
-        query = urllib.parse.urlencode(
-            {
-                "output": "json",
-                "lang": lang,
-                "key": self.key,
-                "client": "chromium",
-                "maxAlternatives": 3,
-                "pFilter": 0,  # үгийг од болгож далдлахгүй
-            }
-        )
-        self._conn.request(
-            "POST",
-            f"{PATH}?{query}",
-            body=pcm,
-            headers={
-                "Content-Type": f"audio/l16; rate={rate}",
-                "Content-Length": str(len(pcm)),
-            },
-        )
-        response = self._conn.getresponse()
-        body = response.read()
-        if response.will_close:
-            self._conn.close()
-            self._conn = None
-        return response.status, body
 
-    def recognize(
-        self, pcm: bytes, rate: int = 16000, lang: str | None = None
-    ) -> tuple[str, float]:
-        """PCM дууг текст болгоно.
+# Импортыг үүсгэгч дотор хийсэн: танигчид энэ файлаас `Provider`-ыг авдаг тул
+# дээд түвшинд импортловол тойрог үүснэ.
+def _build_google(cfg: dict[str, Any], lang: str) -> Provider:
+    from .stt_google import GoogleWebSpeech
 
-        `(текст, итгэлцэл)` хосыг буцаана. Юу ч танигдаагүй бол `("", 0.0)`.
-        Итгэлцлийг үйлчилгээ өгөөгүй бол 1.0 гэж үзнэ.
+    return GoogleWebSpeech(lang=lang)
 
-        Үйлчилгээ түр ачаалагдсан (429) эсвэл сервер талын түр алдаа (5xx) гарвал
-        богино хүлээлттэйгээр дахин оролдоно — эс бөгөөс хэрэглэгчийн хэлсэн
-        өгүүлбэр бүрмөсөн алдагдаж, дахин ярихаас өөр арга үлдэхгүй.
-        """
-        if not pcm:
-            return "", 0.0
-        language = lang or self.lang
-        with self._lock:
-            status, body = self._post_with_retries(pcm, rate, language)
 
-        if status == 403:
-            raise RecognitionError("Таних үйлчилгээ түлхүүрийг хүлээж авсангүй (403).")
-        if status == 429:
-            raise RecognitionError("Хэт олон хүсэлт — түр хүлээнэ үү (429).")
-        if status != 200:
-            raise RecognitionError(f"Таних үйлчилгээ {status} хариу өглөө.")
+def _build_openai(cfg: dict[str, Any], lang: str) -> Provider:
+    from .stt_openai import OpenAICompatible
 
-        return self._parse(body.decode("utf-8", "replace"))
+    return OpenAICompatible(
+        lang=lang,
+        url=str(cfg.get("stt_url") or ""),
+        model=str(cfg.get("stt_model") or ""),
+        key=str(cfg.get("stt_key") or ""),
+    )
 
-    def _post_with_retries(self, pcm: bytes, rate: int, lang: str) -> tuple[int, bytes]:
-        """Түр зуурын алдаанд дахин оролдоно (түгжээ дотор дуудагдана).
 
-        Хүлээлтийг санаатай богино барьсан: ажлын thread нэг ээлжтэй тул энд
-        удвал араас нь ирсэн өгүүлбэрүүд цувж, саатал улам хуримтлагдана.
-        """
-        attempts = len(RETRY_DELAYS) + 1
-        for attempt in range(attempts):
-            reuse = attempt == 0  # дахин оролдохдоо үргэлж шинэ холболтоор
-            try:
-                status, body = self._post(pcm, rate, reuse, lang)
-            except (OSError, http.client.HTTPException) as exc:
-                # Хадгалсан холболт хуучирсан байж болно — дахин оролдоно
-                self._conn = None
-                if attempt == attempts - 1:
-                    raise RecognitionError(f"Сүлжээний алдаа: {exc}") from exc
-                log.warning("сүлжээний алдаа (%d/%d): %s", attempt + 1, attempts, exc)
-                time.sleep(RETRY_DELAYS[attempt])
-                continue
+#: Танигч бүр: тохиргооны нэр → (цонхонд харагдах гарчиг, үүсгэгч).
+#: Шинэ танигч нэмэхэд ЗӨВХӨН энд мөр нэмнэ.
+PROVIDERS: dict[str, tuple[str, Callable[[dict[str, Any], str], Provider]]] = {
+    "google": ("Google (үнэгүй, түлхүүргүй)", _build_google),
+    "openai": ("Өөрийн үйлчилгээ (OpenAI-нийцтэй)", _build_openai),
+}
 
-            if status not in RETRY_STATUSES or attempt == attempts - 1:
-                return status, body
-            log.warning(
-                "үйлчилгээ %d хариу өглөө (%d/%d) — дахин оролдож байна",
-                status, attempt + 1, attempts,
-            )
-            time.sleep(RETRY_DELAYS[attempt])
-        raise AssertionError("хүрэхгүй")  # давталт үргэлж буцаана эсвэл шиднэ
+#: Танихгүй нэр таарвал энэ рүү буцна.
+DEFAULT_PROVIDER = "google"
 
-    @staticmethod
-    def _parse(body: str) -> tuple[str, float]:
-        """Хариу нь мөр бүрт нэг JSON — эхний утгатайг нь авна.
 
-        Эхний хувилбар нь хамгийн магадлалтай нь бөгөөд итгэлцлийг зөвхөн
-        түүнд өгдөг. Итгэлцэл байхгүй бол 1.0 гэж үзнэ (шүүлтгүй өнгөрнө).
-        """
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except ValueError:
-                continue
-            for item in data.get("result", []):
-                for alternative in item.get("alternative") or []:
-                    text = (alternative.get("transcript") or "").strip()
-                    if text:
-                        raw = alternative.get("confidence")
-                        confidence = float(raw) if isinstance(raw, (int, float)) else 1.0
-                        return text, confidence
-        return "", 0.0
+def create(cfg: dict[str, Any]) -> Provider:
+    """Тохиргоонд заасан танигчийг үүсгэнэ.
+
+    Танихгүй нэр бичигдсэн (гараар config.json засах, хуучин хувилбар) бол
+    чимээгүй анхны танигч руу буцна — апп ажиллахаа болихоос дээр.
+    """
+    name = str(cfg.get("stt_provider") or DEFAULT_PROVIDER)
+    lang = str(cfg.get("lang") or "mn-MN")
+    _, build = PROVIDERS.get(name) or PROVIDERS[DEFAULT_PROVIDER]
+    return build(cfg, lang)
+
+
+def titles() -> list[tuple[str, str]]:
+    """Цонхонд харуулах `(нэр, гарчиг)` жагсаалт."""
+    return [(name, title) for name, (title, _) in PROVIDERS.items()]

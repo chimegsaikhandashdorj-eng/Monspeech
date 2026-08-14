@@ -1,7 +1,7 @@
 """Удирдлагын цонхны тест — sidebar + 7 хуудасны бүтэц зөв ажиллаж байна уу.
 
-Жинхэнэ Tk цонх үүсгэдэг (харагдахгүй) тул зөвхөн дэлгэцтэй орчинд ажиллана.
-Дэлгэцгүй бол чимээгүй алгасна.
+Жинхэнэ Tk цонх үүсгэдэг (дэлгэцээс гадуур, тунгалаг) тул зөвхөн дэлгэцтэй
+орчинд ажиллана. Дэлгэцгүй бол чимээгүй алгасна.
 
 Ажиллуулах:  .venv\\Scripts\\python.exe tests\\test_window.py
 """
@@ -30,8 +30,9 @@ def check(label, got, want):
 def shown(widget):
     """Виджет эцэгтээ багцлагдсан эсэх.
 
-    `winfo_ismapped()` нь withdraw хийсэн цонхны хүүхдүүдэд үргэлж худал
-    буцаадаг тул тестэд тохирохгүй — багцлагчаас нь асууна.
+    `winfo_ismapped()`-ийг ашиглахгүй: тэр нь зурагдсан эсэхийг хэлдэг тул
+    `update()` хэзээ дуудагдсанаас хамаарч хэлбэлзэнэ. Багцлагчаас асуувал
+    зорилго нь тодорхой — «энэ виджетийг харуулахаар тавьсан уу».
     """
     return bool(widget.winfo_manager())
 
@@ -93,6 +94,9 @@ class FakeApp:
     def on_mic_changed(self, index):
         self.cfg["mic_index"] = index
 
+    def on_theme_changed(self, code):
+        self.cfg["theme"] = code
+
     def on_option_changed(self, key, value):
         self.cfg[key] = bool(value)
 
@@ -107,6 +111,25 @@ class FakeApp:
         self.saved_snippets = raw
         return raw.count("=")
 
+    def on_lang_apps_changed(self, raw):
+        from monspeech.textproc import parse_replacements
+
+        self.cfg["lang_apps"] = parse_replacements(raw)
+        return len(self.cfg["lang_apps"])
+
+    def open_releases(self):
+        self.opened_releases = True
+
+    def copy_diagnostics(self):
+        return "Мэдээллийг хууллаа"
+
+    def finish_onboarding(self):
+        self.cfg["onboarded"] = True
+
+    def on_stt_changed(self, values):
+        self.cfg.update(values)
+        return f"Танигч: {values['stt_provider']}"
+
 
 try:
     root = tk.Tk()
@@ -114,9 +137,16 @@ except tk.TclError as exc:  # дэлгэцгүй орчин
     print(f"алгаслаа (Tk нээгдсэнгүй: {exc})")
     raise SystemExit(0)
 
-root.withdraw()  # тестийн явцад дэлгэц дээр гарахгүй
+# Дэлгэцээс гадуур байрлуулна — `withdraw()` биш. Шалтгаан: withdraw хийсэн
+# цонхны хүүхдүүд map хийгддэггүй тул `event_generate` тэдэнд хүрэхгүй, товчлуурын
+# шалгалт санамсаргүй унана. Гадуур байрлуулбал эвент бодитоор дамжина.
+root.geometry("1000x700+-3000+-3000")
+try:
+    root.attributes("-alpha", 0.0)  # map хийгдсэн ч бүрэн үл үзэгдэх
+except tk.TclError:
+    pass  # энэ платформ дэмжихгүй бол дэлгэцээс гадуур байрлал хангалттай
 
-from monspeech.window import NAV, ControlWindow  # noqa: E402 - Tk шалгасны дараа
+from monspeech.window import NAV, ControlWindow, unknown_language_codes  # noqa: E402 - Tk шалгасны дараа
 
 app = FakeApp()
 ui = ControlWindow(root, app)
@@ -136,9 +166,17 @@ check("сонгосон хуудас харагдав", shown(ui.pages[3]), True
 check("өмнөх хуудас нуугдав", shown(ui.pages[0]), False)
 
 # --- Ctrl+1..7 ---
-root.event_generate("<Control-Key-5>")
+# Синтетик товчлуурын эвент ашиглахгүй: тэр нь OS-ийн фокустай виджет рүү
+# очдог тул дэлгэцээс гадуурх тунгалаг цонхонд найдваргүй (хэмжсэн: багц
+# дотор 8 удаагийн 2-т унасан). Холбоос холбогдсон эсэх, тэр нь зөв хуудас
+# сонгодог эсэх хоёр л бидний хяналтад.
+for number in range(1, 8):
+    if not root.bind(f"<Control-Key-{number}>"):
+        fails.append(f"Ctrl+{number} холбогдоогүй")
+check("Ctrl+1..7 бүгд холбогдсон", len(fails), 0)
+ui.select(4)
 root.update()
-check("Ctrl+5 → Толь", ui.pages[ui.page_index].title, "Толь")
+check("Ctrl+5-ын байрлал → Толь", ui.pages[ui.page_index].title, "Толь")
 
 # --- Хайлт нь навигацийн туслах ---
 ui.search_var.set("микрофон")
@@ -159,9 +197,12 @@ ui.search_var.set("")
 root.update()
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 10)
+check("чагтын тоо", len(ui.toggles), 13)
+check("хэл сэжиглэх чагт", "detect_language" in ui.toggles, True)
+check("шинэчлэл шалгах чагт", "check_updates" in ui.toggles, True)
 check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
 check("долгион чагт", "wave_overlay" in ui.toggles, True)
+check("чигчлүүр цэвэрлэх чагт", "clean_speech" in ui.toggles, True)
 
 # --- Гулсуурууд (өмнө нь combobox байсан) ---
 check("гулсуурын тоо", len(ui.sliders), 4)
@@ -186,6 +227,31 @@ root.update()
 check("мөр нэмэгдсэн", ui.pairs.mapping()["монспич"], "Monspeech")
 ui._save_dictionary(ui.pairs.mapping())
 check("толь хадгалагдсан", "монспич=Monspeech" in (app.saved_replacements or ""), True)
+
+# --- Толины гурав дахь таб: аппаар ялгах хэл ---
+ui._dictionary_tab(2)
+root.update()
+check("аппын хэлний таб хоосон", ui.pairs.mapping(), {})
+check(
+    "баганын шошго солигдов",
+    tuple(ui.pairs._labels),
+    ("Цонхны нэрний хэсэг", "Хэлний код"),
+)
+ui.pairs.add_row("Visual Studio Code", "en-US")
+root.update()
+ui._save_dictionary(ui.pairs.mapping())
+check("аппын хэл хадгалагдсан", app.cfg["lang_apps"], {"Visual Studio Code": "en-US"})
+
+# Танихгүй хэлний кодыг чимээгүй хүлээж авахгүй
+check(
+    "танихгүй код илэрнэ",
+    unknown_language_codes({"Notepad": "xx-YY", "Code": "en-US"}),
+    ["xx-YY"],
+)
+check("бүгд танигдвал хоосон", unknown_language_codes({"Code": "en-US"}), [])
+
+ui._dictionary_tab(0)
+root.update()
 
 # --- Хоёр дахь хэл цонхноос сонгогдоно ---
 check("одоогийн хоёр дахь хэл", ui.alt_lang_var.get(), "English (US)")
@@ -236,6 +302,37 @@ ui.toggles["auto_capitalize"]._clicked()
 root.update()
 check("том үсэг унтраахад тусав", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
 
+# --- Анх ажиллуулахад танилцуулга гарна, дараа нь дахин гарахгүй ---
+check("танилцуулга гарсан", shown(ui.welcome), True)
+ui._finish_welcome()
+root.update()
+check("товшсоны дараа алга болсон", ui.welcome, None)
+check("дахин гарахгүй гэж тэмдэглэсэн", app.cfg["onboarded"], True)
+
+# --- Шинэ хувилбар олдвол мэдэгдэнэ ---
+check("эхэндээ товч нуугдсан", shown(ui.update_button), False)
+ui.show_update("v9.9.9")
+root.update()
+check("хувилбарын мөр солигдсон", "v9.9.9" in ui.version_var.get(), True)
+check("шинэчлэх товч гарсан", shown(ui.update_button), True)
+
+# --- Танигч: нэмэлт талбарууд зөвхөн өөрийн үйлчилгээнд гарна ---
+check("анхандаа талбарууд нуугдсан", shown(ui.stt.extra), False)
+check("гурван талбар бэлдсэн", sorted(ui.stt.vars), ["stt_key", "stt_model", "stt_url"])
+ui.stt.provider_var.set("Өөрийн үйлчилгээ (OpenAI-нийцтэй)")
+ui.stt._selected()
+root.update()
+check("сонгоход талбарууд гарсан", shown(ui.stt.extra), True)
+check("тохиргоо хадгалагдсан", app.cfg["stt_provider"], "openai")
+ui.stt.vars["stt_url"].set("https://example.test/v1/audio/transcriptions")
+ui.stt._changed()
+check("хаяг хадгалагдсан", app.cfg["stt_url"], "https://example.test/v1/audio/transcriptions")
+ui.stt.provider_var.set("Google (үнэгүй, түлхүүргүй)")
+ui.stt._selected()
+root.update()
+check("буцаад нуугдсан", shown(ui.stt.extra), False)
+check("буцаад google болсон", app.cfg["stt_provider"], "google")
+
 # --- Sidebar хумих ---
 ui.toggle_sidebar()
 root.update()
@@ -252,6 +349,78 @@ check(
     [name for _, name in NAV],
     ["Төлөв", "Яриа", "Бичилт", "Товчлуур", "Толь", "Түүх", "Нэмэлт"],
 )
+
+# --- Гарын фокус: Tab-аар хүрч, хүрсэн нь харагдана ---
+# Хулганагүй хүн зөвхөн Tab-аар явна. Хүрч болдоггүй товч, эсвэл хүрсэн ч
+# хаана байгаа нь харагддаггүй бол уг удирдлага тэдэнд байхгүйтэй адил.
+ui.select(1)
+root.update()
+toggle = ui.toggles["detect_language"]
+check("унтраалганд Tab хүрнэ", int(toggle.cget("takefocus")), 1)
+# Tk нь `Label`-д суурилсан удирдлагад фокусын хүрээг ОГТ зурдаггүй
+# (пикселээр баталсан) тул унтраалга өөрөө зурна — төлөв нь солигдож,
+# зураг нь дахин зурагдана.
+check("унтраалга фокус мэднэ", toggle._focused, False)
+toggle._set_focus(True)
+check("фокус тэмдэглэгдэв", toggle._focused, True)
+check("фокустай зураг өөр", toggle.cget("image") != "", True)
+toggle._set_focus(False)
+
+# Товчлуур ажиллаж байгааг ХОЛБООСООР шалгана, синтетик эвентээр биш.
+# Шалтгаан: `event_generate` нь эвентийг OS-ийн фокустай виджет рүү чиглүүлдэг
+# бөгөөд дэлгэцээс гадуурх тунгалаг цонх фокусыг найдвартай авдаггүй — хэмжихэд
+# багц дотор 8 удаагийн 2-т унасан. Холбоос байгаа эсэх, дуудагдахдаа юу
+# хийдэг нь бидний хяналтад байгаа зүйл; эвент хүргэлт бол Tk-гийн ажил.
+check("зай холбогдсон", bool(toggle.bind("<space>")), True)
+check("Enter холбогдсон", bool(toggle.bind("<Return>")), True)
+before = toggle.value
+toggle._clicked()
+check("товчлуурын зохицуулагч унтраалгыг эргүүлнэ", toggle.value, not before)
+toggle._clicked()
+check("буцаад анхны утга", toggle.value, before)
+
+nav = ui.nav[0]
+check("цэсэнд Tab хүрнэ", int(nav.cget("takefocus")), 1)
+check("цэсний дүрс тусдаа зогсоол биш", int(nav.icon.cget("takefocus")), 0)
+
+check("гулсуурт хүрээ бий", int(ui.sliders["silence_hold"].canvas.cget("highlightthickness")) > 0, True)
+check("хайлтын талбарт хүрээ бий", int(ui.search.entry.cget("highlightthickness")) > 0, True)
+
+# --- Сэдэв сонгох ---
+check("сэдвийн сонголт бий", ui.theme_var.get(), "Харанхуй")
+ui.theme_var.set("Гэрэлтэй")
+ui._theme_changed()
+check("сэдэв тохиргоонд хадгалагдав", app.cfg["theme"], "light")
+ui.theme_var.set("Харанхуй")
+ui._theme_changed()
+check("буцаад харанхуй", app.cfg["theme"], "dark")
+
+# --- Гүйлгэгч гарч ирэхэд агуулгын өргөн хэлбэлзэхгүй ---
+# Урт тайлбартай мөр нэмэхэд өмнө нь цонх хоёр өргөний хооронд төгсгөлгүй
+# эргэлдэж гацдаг байв: гүйлгэгч зай эзэлж → агуулга нарийсч → тайлбар нэмэлт
+# мөрөнд шилжиж → агуулга уртсаж → гүйлгэгч хэрэгтэй хэвээр. `place`-ээр
+# давхарласны дараа өргөн нь гүйлгэгчээс хамаарахаа болих ёстой.
+from monspeech.widgets import Card  # noqa: E402 - Tk шалгасны дараа
+
+page = ui.pages[6]
+before = page.body.winfo_width()
+card = Card(page.body)
+for index in range(12):
+    card.row(
+        f"Урт тайлбартай мөр {index}",
+        "Энэ бол зориуд урт тайлбар: гүйлгэгч гарч ирэхэд мөр таслалт нь "
+        "өөрчлөгдөж, агуулгын өндөр солигдох ёстой байсан тохиолдлыг дуурайна.",
+    )
+root.update()
+check("гүйлгэгч хэрэгтэй болсон", page._bar_shown, True)
+check("агуулгын өргөн хэвээр", page.body.winfo_width(), before)
+
+# Хэд дахин update хийхэд ч тогтвортой — эргэлдэж байвал энд өөрчлөгдөнө
+widths = set()
+for _ in range(5):
+    root.update()
+    widths.add(page.body.winfo_width())
+check("давтан update-д тогтвортой", len(widths), 1)
 
 root.destroy()
 

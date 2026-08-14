@@ -1,10 +1,27 @@
-"""Таньсан текстийг цэгцлэх: дуут цэг таслал, том үсэг, үг солих.
+"""Таньсан текстийг цэгцлэх.
 
-Google-ийн таних үйлчилгээ монгол хэл дээр цэг таслал тавьдаггүй тул
-хэрэглэгч "цэг", "таслал", "шинэ мөр" гэж дуудаж оруулна.
+Дөрвөн ажил энд байна:
+
+* **Дуут цэг таслал, том үсэг, үг солих** (`Formatter`) — Google-ийн таних
+  үйлчилгээ монгол хэл дээр цэг таслал тавьдаггүй тул хэрэглэгч "цэг",
+  "таслал", "шинэ мөр" гэж дуудаж оруулна.
+* **Ярианы чигчлүүр цэвэрлэх** (`clean_speech`) — «за ааа маргааш уулзъя»
+  гэдгийг дүрмээр цэгцэлнэ. LLM хэрэггүй, офлайн, 0 мс.
+* **Хувилбар сонгох** (`choose_alternative`, `Formatter.choose`) — үйлчилгээний
+  буцаасан хэд хэдэн хувилбараас хэрэглэгчийн үгсийн санд нийцэхийг сонгоно.
+* **Засвараас суралцах** (`learn_corrections`) — хэрэглэгчийн гараар зассан
+  зөрүүг толины дүрэм болгоно.
 """
 
 from __future__ import annotations
+
+import re
+from collections import deque
+from collections.abc import Iterable
+
+#: `Formatter` хэдэн батлагдсан өгүүлбэрийг санаж хувилбар сонгоход ашиглах вэ.
+#: Богино зориуд: хэт урт бол хуучин сэдвийн үг өнөөдрийнхийг дийлж эхэлнэ.
+HISTORY_MEMORY = 40
 
 # Олон үгтэй командыг эхэнд нь тавих шаардлагагүй — уртаас нь эхлэн тааруулна.
 VOICE_COMMANDS: dict[str, str] = {
@@ -70,6 +87,191 @@ TIGHT_RIGHT = "(\"\n"
 _STRIP = " \t.,;:!?…\"'()[]«»„“”"
 
 
+# ----------------------------------------------------------------------
+# Ярианы чигчлүүр цэвэрлэх
+#
+# Ярьж байгаа хүн бичиж байгаа хүн шиг ярьдаггүй: «за ааа маргааш уулзъя»
+# гэдэг. Үүнийг LLM-гүйгээр, дүрмээр нь цэвэрлэнэ — саатал 0 мс, офлайн.
+#
+# Гол зарчим: ЭРГЭЛЗВЭЛ ХӨНДӨХГҮЙ. Буруу хассан үгийг хэрэглэгч анзаарахгүй
+# өнгөрч болзошгүй тул жагсаалт бүрийг зориуд нарийсгасан.
+# ----------------------------------------------------------------------
+
+# Ухралт зогсоох бичигдсэн цэг таслал (`_is_boundary` хардаг).
+_SENTENCE_END = (".", ",", ";", ":", "!", "?", "…")
+_SPACE = " \t\"')]»“”"
+
+# Утгагүй чимээ — аль ч байрлалаас хасна.
+# «ээ», «уу», «үү» ЗОРИУД БАЙХГҮЙ: эдгээр нь монгол хэлний жинхэнэ бөөм
+# («тийм ээ», «байна уу», «мөн үү») тул хасвал өгүүлбэр эвдэрнэ.
+#
+# «аа», «өө» нь хоёр нүүртэй: өгүүлбэрийн эхэнд бол чимээ («аа тэгэхээр…»),
+# үгийн АРААС бол эгшиг зохицлын бөөм («явъя аа», «өгье өө») — «ээ»-гийн
+# хосууд. Ялгаа нь уртад: яг хоёр үсэг бол бөөм байж болно, гурав ба түүнээс
+# дээш («ааа») бол сунгасан чимээ тул хаана ч байсан хасна.
+_NOISE = re.compile(
+    r"^(?:а{3,}|ө{3,}|э{3,}|м{2,}|и{2,}|u+m+|u+h+|e+r+m*|h+m+|a+h+)$"
+)
+
+# Эхэнд байвал чимээ, үгийн араас байвал бөөм.
+_TRAILING_PARTICLE = re.compile(r"^(?:аа|өө)$")
+
+# Зөвхөн ЭХЭНД байвал хасах чигчлүүр. Өгүүлбэр дундаас хасахгүй — «тэгээд»,
+# «тэр» зэрэг нь дунд байхдаа утгатай байдаг.
+LEADING_FILLERS: tuple[tuple[str, ...], ...] = (
+    ("за", "тэгээд"),
+    ("за", "яахав"),
+    ("юу", "гэх", "вэ"),
+    ("яахав",),
+    ("за",),
+)
+
+# «Ингэж хэлье гэсэн юм... үгүй ээ, ингэж» гэдгийг таних тэмдэг. Ганц үгээр
+# биш, ХОЁР ҮГЭЭР таана: дан «үгүй», «биш» нь өдөр тутмын үг тул тэднийг
+# тэмдэг гэж үзвэл жинхэнэ өгүүлбэрийг таслах эрсдэлтэй.
+CORRECTION_MARKERS: tuple[tuple[str, ...], ...] = (
+    ("үгүй", "ээ"),
+    ("биш", "ээ"),
+    ("i", "mean"),
+)
+
+# Давталт хураахаас хамгаалах үгс — эдгээрийг давтах нь чангатгах утгатай.
+EMPHASIS = frozenset({"маш", "их", "дэндүү", "асар", "нэн", "very", "really"})
+
+# Эш татах үгс. «"За" гэж хэлээд явлаа» гэвэл «за» нь чигчлүүр биш, иш татсан
+# үг — араас нь эдгээрийн аль нэг ирвэл хасахгүй.
+QUOTE_MARKERS = frozenset({"гэж", "гээд", "гэсэн", "гэнэ", "гэдэг", "гэх", "гэвэл"})
+
+
+def _core(word: str) -> str:
+    return word.strip(_STRIP).lower()
+
+
+def _starts_with(words: list[str], phrase: tuple[str, ...], index: int = 0) -> bool:
+    if index + len(phrase) > len(words):
+        return False
+    return all(_core(words[index + i]) == part for i, part in enumerate(phrase))
+
+
+def _drop_noise(words: list[str]) -> list[str]:
+    out: list[str] = []
+    for word in words:
+        core = _core(word)
+        if _NOISE.match(core):
+            continue
+        # «аа», «өө» нь өмнөө үг байвал бөөм тул үлдээнэ; өгүүлбэрийн эхэнд
+        # эсвэл өмнөх нь өөрөө хилийн цэг таслал байвал чимээ гэж үзнэ.
+        if _TRAILING_PARTICLE.match(core) and (not out or _is_boundary(out[-1])):
+            continue
+        out.append(word)
+    return out
+
+
+def _drop_leading(words: list[str]) -> list[str]:
+    """Эхний чигчлүүрүүдийг дараалан хасна («за яахав тэгэхээр…»)."""
+    changed = True
+    while changed and words:
+        changed = False
+        for phrase in LEADING_FILLERS:
+            if len(words) <= len(phrase) or not _starts_with(words, phrase):
+                continue
+            if _core(words[len(phrase)]) in QUOTE_MARKERS:
+                continue  # иш татсан үг — чигчлүүр биш
+            words = words[len(phrase) :]
+            changed = True
+            break
+    return words
+
+
+def _is_boundary(word: str) -> bool:
+    """Ухралт энд зогсох ёстой юу.
+
+    Хоёр хэлбэрийн цэг таслал байна: ХЭЛСЭН нь («цэг» гэж дуудсан, `VOICE_COMMANDS`)
+    ба БИЧИГДСЭН нь («болно.» гэж танигчаас ирсэн). Танигч бүр эхнийхийг л
+    буцаадаггүй — OpenAI бичиглэл, `en-US` хариу нь бэлэн цэг таслалтай ирдэг —
+    тул хоёуланг нь хилээр тооцно.
+    """
+    if _core(word) in VOICE_COMMANDS:
+        return True
+    return word.rstrip(_SPACE).endswith(_SENTENCE_END)
+
+
+def _apply_corrections(words: list[str]) -> list[str]:
+    """«5 цагт үгүй ээ 6 цагт» → «6 цагт».
+
+    Тэмдэг олдвол өмнөх хэсгийг хаяна — гэхдээ бүхлээр нь биш, зөвхөн хамгийн
+    сүүлийн цэг таслалын дараах хэсгийг. Ингэснээр өмнөх бүтэн өгүүлбэр
+    санамсаргүй устахгүй.
+    """
+    index = 0
+    while index < len(words):
+        marker = next(
+            (m for m in CORRECTION_MARKERS if _starts_with(words, m, index)), None
+        )
+        if marker is None:
+            index += 1
+            continue
+        boundary = -1
+        for back in range(index - 1, -1, -1):
+            if _is_boundary(words[back]):
+                boundary = back
+                break
+        words = words[: boundary + 1] + words[index + len(marker) :]
+        index = boundary + 1
+    return words
+
+
+def _collapse_repeats(words: list[str]) -> list[str]:
+    """«би би би явлаа» → «би явлаа». Чангатгах давталтыг хөндөхгүй.
+
+    Давтагдсанаас СҮҮЛЧИЙНХИЙГ нь үлдээнэ: цэг таслал сүүлийн үгэнд наалддаг
+    тул эхнийхийг үлдээвэл «тийм тийм.» → «тийм» болж цэг нь алга болно.
+    """
+    out: list[str] = []
+    for word in words:
+        core = _core(word)
+        if out and core and core == _core(out[-1]) and core not in EMPHASIS:
+            out[-1] = word
+            continue
+        out.append(word)
+    return out
+
+
+#: Кирилл үсгийн хүрээ (монгол өргөтгөлүүд болох ө, ү багтана).
+_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+#: Латин үсэг.
+_LATIN = re.compile(r"[A-Za-z]")
+
+
+def looks_foreign(text: str) -> bool:
+    """Монголоор таньсан гэж хэлж буй текст үнэндээ кирилл биш байна уу.
+
+    Танигч `mn-MN`-ээр асуухад англи яриаг сонсвол латинаар бичсэн үр дүн
+    буцаадаг. Тоо, цэг таслал ганцаараа шийдэхгүй тул ҮСЭГ л тоологдоно:
+    үсэг огт байхгүй бол «мэдэхгүй» гэж үзээд худал буцаана (эргэлзвэл
+    хөндөхгүй).
+    """
+    cyrillic = len(_CYRILLIC.findall(text))
+    latin = len(_LATIN.findall(text))
+    if not latin:
+        return False
+    return latin > cyrillic
+
+
+def clean_speech(raw: str) -> str:
+    """Ярианы чигчлүүрийг хасаж, бичихэд тохирох хэлбэрт оруулна.
+
+    Дөрвөн алхам: утгагүй чимээ → эхний чигчлүүр → өөрийгөө засах → давталт.
+    Юу ч үлдэхгүй бол хоосон буцаана (дуудагч нь «зөвхөн чигчлүүр сонсогдлоо»
+    гэж мэдэгдэнэ) — санамсаргүй чимээг текст болгож оруулахгүй.
+    """
+    words = raw.split()
+    if not words:
+        return ""
+    words = _collapse_repeats(_apply_corrections(_drop_leading(_drop_noise(words))))
+    return " ".join(words)
+
+
 class Formatter:
     """Дараалан ирэх өгүүлбэрүүдийг залгаж, зөв хэлбэрт оруулна.
 
@@ -90,7 +292,24 @@ class Formatter:
         self.voice_punctuation = voice_punctuation
         self._set_replacements(replacements)
         self.set_snippets(snippets)
+        self._history: deque[str] = deque(maxlen=HISTORY_MEMORY)
         self.reset()
+
+    def remember(self, text: str) -> None:
+        """Батлагдсан текстийг санана — дараагийн хувилбар сонголтод жин болно."""
+        text = text.strip()
+        if text:
+            self._history.append(text)
+
+    def choose(self, alternatives: list[str]) -> str:
+        """Таних хувилбаруудаас өөрийн үгсийн сан, түүхэнд хамгийн нийцэхийг сонгоно.
+
+        Дуудагч толь, товчлол, түүхийг тус тусад нь мэдэх шаардлагагүй —
+        бүгд энд байна.
+        """
+        return choose_alternative(
+            alternatives, self.replacements, self.snippets, self._history
+        )
 
     def _set_replacements(self, replacements: dict[str, str] | None) -> None:
         self.replacements = {k.strip().lower(): v for k, v in (replacements or {}).items()}
@@ -252,6 +471,95 @@ def parse_replacements(raw: str) -> dict[str, str]:
 
 def format_replacements(mapping: dict[str, str]) -> str:
     return "\n".join(f"{k}={v}" for k, v in sorted(mapping.items()))
+
+
+# Хувилбар сонгоход өгөх оноо. Хэрэглэгч өөрөө бичсэн зүйл хамгийн жинтэй.
+SNIPPET_SCORE = 3  # дуут товчлол — санаатай хэлдэг хэллэг
+CORRECT_SCORE = 3  # толийн зөв тал — хэрэглэгчийн хүсдэг бичиглэл
+HEARD_SCORE = 2  # толийн буруу тал — ямар ч байсан засагдана
+# Түүхэнд өмнө нь батлагдсан үг. Хамгийн сул нотолгоо: хэрэглэгч зориуд
+# бичээгүй, зүгээр л нэг удаа хэлсэн байж болно. Тиймээс толь, товчлолыг
+# хэзээ ч дийлэхгүй — зөвхөн бусад нь тэнцэх үед л жинг хэлнэ.
+HISTORY_SCORE = 1
+
+
+def _vocabulary(
+    replacements: dict[str, str],
+    snippets: dict[str, str],
+    history: Iterable[str] = (),
+) -> tuple[dict[str, int], int]:
+    """Хэрэглэгчийн үгсийн сан → `{хэллэг: оноо}` ба хамгийн урт хэллэгийн үгийн тоо."""
+    table: dict[str, int] = {}
+
+    def add(phrase: str, score: int) -> None:
+        key = " ".join(w.strip(_STRIP).lower() for w in phrase.split() if w.strip(_STRIP))
+        if key:
+            table[key] = max(table.get(key, 0), score)
+
+    # Түүх хамгийн сул нотолгоо тул хамгийн түрүүнд: толь, товчлол давхцвал
+    # `max()`-аар тэдний өндөр оноо дийлнэ.
+    for text in history:
+        for word in text.split():
+            add(word, HISTORY_SCORE)
+    for phrase in snippets:
+        add(phrase, SNIPPET_SCORE)
+    for heard, correct in replacements.items():
+        add(heard, HEARD_SCORE)
+        add(correct, CORRECT_SCORE)
+    return table, max((len(key.split()) for key in table), default=1)
+
+
+def _vocabulary_score(text: str, table: dict[str, int], longest: int) -> int:
+    """Текст хэрэглэгчийн үгсийн сантай хэр нийцэж байгааг оноогоор хэмжинэ."""
+    words = text.split()
+    total = 0
+    index = 0
+    while index < len(words):
+        for size in range(min(longest, len(words) - index), 0, -1):
+            phrase = " ".join(w.strip(_STRIP).lower() for w in words[index : index + size])
+            score = table.get(phrase)
+            if score is not None:
+                total += score
+                index += size
+                break
+        else:
+            index += 1
+    return total
+
+
+def choose_alternative(
+    alternatives: list[str],
+    replacements: dict[str, str] | None = None,
+    snippets: dict[str, str] | None = None,
+    history: Iterable[str] = (),
+) -> str:
+    """Таних хувилбаруудаас хэрэглэгчийн үгсийн санд хамгийн сайн нийцэхийг сонгоно.
+
+    Үйлчилгээ нэг хэлсэн зүйлд хэд хэдэн хувилбар буцаадаг ч өмнө нь зөвхөн
+    эхнийхийг нь авдаг байсан — үлдсэн нь хариунд ирээд хаягддаг байв. Толиндоо
+    «клауд=Claude» гэж нэмсэн хүн «Claude» гэж хэлэхэд эхний хувилбар нь «клоуд»
+    гараад хоёр дахь нь «клауд» байх нь бий; тэр тохиолдолд хоёр дахийг нь
+    сонгоно. Нэмэлт хүсэлт, нэмэлт саатал, нэмэлт төлбөр үүсэхгүй.
+
+    Зөвхөн хэрэглэгчийн ӨӨРИЙН бичсэн үг (толь, дуут товчлол) болон түүхэнд
+    өмнө нь батлагдсан үг оноо өгнө. Дуут командыг санаатай оруулаагүй: «цэг»
+    гэж сонсогдсон бүхнийг дэвшүүлбэл жинхэнэ үгийг цэг болгож гээх эрсдэлтэй.
+    Оноо тэнцвэл үйлчилгээний эрэмбэ хэвээр үлдэнэ — нотолгоогүй бол хөндөхгүй.
+    """
+    if not alternatives:
+        return ""
+    best = alternatives[0]
+    if len(alternatives) < 2:
+        return best
+    table, longest = _vocabulary(replacements or {}, snippets or {}, history)
+    if not table:
+        return best
+    best_score = _vocabulary_score(best, table, longest)
+    for candidate in alternatives[1:]:
+        score = _vocabulary_score(candidate, table, longest)
+        if score > best_score:
+            best, best_score = candidate, score
+    return best
 
 
 def learn_corrections(heard: str, corrected: str, limit: int = 6) -> dict[str, str]:
