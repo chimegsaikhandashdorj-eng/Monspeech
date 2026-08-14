@@ -178,7 +178,8 @@ Monspeech-д суурь нь бэлэн: [winfocus.py:128](../monspeech/winfocus
 
 ### 5.4 ⭐ Агент горим — Hermes гүүрийг апп руу
 
-`tools/monspeech_hermes_bridge.py` (292 мөр, git-д ороогүй байна) бол үнэндээ
+`tools/monspeech_hermes_bridge.py` (репод орсон; daily note-ийн зам нь
+`MONSPEECH_DAILY_DIR` орчны хувьсагчаас уншина) бол үнэндээ
 **Glaido-гийн Agent Mode-ын прототип**: танигдсан текстийг Hermes рүү явуулж,
 хариуг clipboard-д тавьдаг, `--trigger` үгээр шүүдэг, Obsidian-ы daily note руу
 бичдэг.
