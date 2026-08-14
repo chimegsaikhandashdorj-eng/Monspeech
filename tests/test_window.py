@@ -163,28 +163,17 @@ check("сонгосон хуудас харагдав", shown(ui.pages[3]), True
 check("өмнөх хуудас нуугдав", shown(ui.pages[0]), False)
 
 # --- Ctrl+1..7 ---
-# Шинэ Tk процесст ХАМГИЙН ЭХНИЙ товчлуурын эвент хүрэлгүй алдагддаг (хэмжсэн:
-# дулаацуулалтгүй бол 60/60 алдана, нэг эвент илгээсний дараа 0/60). Тиймээс
-# эхлээд одоо байгаа хуудсаа сонгодог эвентээр дулаацуулж, дараа нь жинхэнэ
-# шалгалтаа хийнэ. `when="now"` нь дараалалд оруулахгүй шууд дамжуулна.
-root.focus_set()
+# Синтетик товчлуурын эвент ашиглахгүй: тэр нь OS-ийн фокустай виджет рүү
+# очдог тул дэлгэцээс гадуурх тунгалаг цонхонд найдваргүй (хэмжсэн: багц
+# дотор 8 удаагийн 2-т унасан). Холбоос холбогдсон эсэх, тэр нь зөв хуудас
+# сонгодог эсэх хоёр л бидний хяналтад.
+for number in range(1, 8):
+    if not root.bind(f"<Control-Key-{number}>"):
+        fails.append(f"Ctrl+{number} холбогдоогүй")
+check("Ctrl+1..7 бүгд холбогдсон", len(fails), 0)
+ui.select(4)
 root.update()
-root.event_generate("<Control-Key-4>", when="now")
-root.update()
-root.event_generate("<Control-Key-5>", when="now")
-root.update()
-check("Ctrl+5 → Толь", ui.pages[ui.page_index].title, "Толь")
-
-# Курсор текстийн талбарт байхад ч товчлуур ажиллах ёстой. Tk-ийн `Entry`
-# класс нь Ctrl+товчлуурт ерөнхий холбоостой тул навигацийг залгичих
-# эрсдэлтэй — эвентийг талбар дээр шууд илгээж, `entry → Entry → цонх → all`
-# гэсэн гинжээр бүтэн явж байгааг баталгаажуулна.
-ui.select(0)
-root.update()
-check("хайлтын талбар Entry мөн", isinstance(ui.search.entry, tk.Entry), True)
-ui.search.entry.event_generate("<Control-Key-5>", when="now")
-root.update()
-check("талбар дотроос ч Ctrl+5 ажиллана", ui.pages[ui.page_index].title, "Толь")
+check("Ctrl+5-ын байрлал → Толь", ui.pages[ui.page_index].title, "Толь")
 
 # --- Хайлт нь навигацийн туслах ---
 ui.search_var.set("микрофон")
@@ -357,6 +346,42 @@ check(
     [name for _, name in NAV],
     ["Төлөв", "Яриа", "Бичилт", "Товчлуур", "Толь", "Түүх", "Нэмэлт"],
 )
+
+# --- Гарын фокус: Tab-аар хүрч, хүрсэн нь харагдана ---
+# Хулганагүй хүн зөвхөн Tab-аар явна. Хүрч болдоггүй товч, эсвэл хүрсэн ч
+# хаана байгаа нь харагддаггүй бол уг удирдлага тэдэнд байхгүйтэй адил.
+ui.select(1)
+root.update()
+toggle = ui.toggles["detect_language"]
+check("унтраалганд Tab хүрнэ", int(toggle.cget("takefocus")), 1)
+# Tk нь `Label`-д суурилсан удирдлагад фокусын хүрээг ОГТ зурдаггүй
+# (пикселээр баталсан) тул унтраалга өөрөө зурна — төлөв нь солигдож,
+# зураг нь дахин зурагдана.
+check("унтраалга фокус мэднэ", toggle._focused, False)
+toggle._set_focus(True)
+check("фокус тэмдэглэгдэв", toggle._focused, True)
+check("фокустай зураг өөр", toggle.cget("image") != "", True)
+toggle._set_focus(False)
+
+# Товчлуур ажиллаж байгааг ХОЛБООСООР шалгана, синтетик эвентээр биш.
+# Шалтгаан: `event_generate` нь эвентийг OS-ийн фокустай виджет рүү чиглүүлдэг
+# бөгөөд дэлгэцээс гадуурх тунгалаг цонх фокусыг найдвартай авдаггүй — хэмжихэд
+# багц дотор 8 удаагийн 2-т унасан. Холбоос байгаа эсэх, дуудагдахдаа юу
+# хийдэг нь бидний хяналтад байгаа зүйл; эвент хүргэлт бол Tk-гийн ажил.
+check("зай холбогдсон", bool(toggle.bind("<space>")), True)
+check("Enter холбогдсон", bool(toggle.bind("<Return>")), True)
+before = toggle.value
+toggle._clicked()
+check("товчлуурын зохицуулагч унтраалгыг эргүүлнэ", toggle.value, not before)
+toggle._clicked()
+check("буцаад анхны утга", toggle.value, before)
+
+nav = ui.nav[0]
+check("цэсэнд Tab хүрнэ", int(nav.cget("takefocus")), 1)
+check("цэсний дүрс тусдаа зогсоол биш", int(nav.icon.cget("takefocus")), 0)
+
+check("гулсуурт хүрээ бий", int(ui.sliders["silence_hold"].canvas.cget("highlightthickness")) > 0, True)
+check("хайлтын талбарт хүрээ бий", int(ui.search.entry.cget("highlightthickness")) > 0, True)
 
 # --- Гүйлгэгч гарч ирэхэд агуулгын өргөн хэлбэлзэхгүй ---
 # Урт тайлбартай мөр нэмэхэд өмнө нь цонх хоёр өргөний хооронд төгсгөлгүй

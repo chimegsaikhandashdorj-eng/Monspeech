@@ -272,11 +272,49 @@ def rounded_entry(
     entry = tk.Entry(
         box.inner, textvariable=variable, bg=theme.PANEL2, fg=theme.TEXT,
         insertbackground=theme.TEXT, relief="flat", font=font,
-        highlightthickness=0, bd=0, width=width,
+        bd=0, width=width,
         show="•" if secret else "",
+    )
+    # Оролт нь Tab-аар аль хэдийн хүрдэг ч хүрээгүй бол хаана байгаа нь
+    # мэдэгдэхгүй — курсор анивчих нь хангалттай тэмдэг биш.
+    entry.configure(
+        highlightthickness=theme.FOCUS_WIDTH,
+        highlightbackground=theme.PANEL2,
+        highlightcolor=theme.FOCUS,
     )
     entry.pack(fill="x" if stretch else "none")
     return box, entry
+
+
+def focusable(widget, activate=None, *, surface: str | None = None, paint=None) -> None:
+    """Виджетийг Tab-аар хүрч, товчлуураар ажиллуулж болдог болгоно.
+
+    Хоёр төрлийн виджет байна:
+
+    * **`Entry`, `Listbox`, `Canvas`** — Tk өөрөө фокусын хүрээг зурдаг тул
+      `surface` өгөхөд л хангалттай (хүрээ нь үргэлж байрлаж, фокусгүй үед
+      гадаргуутай ижил өнгөтэй тул үл үзэгдэнэ; зузаан нь өөрчлөгддөггүй тул
+      фокус хөдлөхөд зохион байгуулалт үсрэхгүй).
+    * **`Label`-д суурилсан захиалгат удирдлагууд** (унтраалга, товч, холбоос,
+      цэс) — Tk эдгээр дээр хүрээг **огт зурдаггүй** (пикселээр баталсан).
+      Тэдгээр нь `paint(focused)` дамжуулж, харагдацаа өөрсдөө зурна.
+
+    `activate` өгвөл Enter, зай хоёрыг товшилттой адилтгана — хулганагүй хүнд
+    хүрч болох мөртлөө ажиллуулж болдоггүй товч нь дэмий.
+    """
+    widget.configure(takefocus=True)
+    if surface is not None:
+        widget.configure(
+            highlightthickness=theme.FOCUS_WIDTH,
+            highlightbackground=surface,
+            highlightcolor=theme.FOCUS,
+        )
+    if paint is not None:
+        widget.bind("<FocusIn>", lambda _e: paint(True), add="+")
+        widget.bind("<FocusOut>", lambda _e: paint(False), add="+")
+    if activate is not None:
+        widget.bind("<Return>", activate)
+        widget.bind("<space>", activate)
 
 
 def combo(parent, variable, values, command) -> ttk.Combobox:
@@ -304,9 +342,16 @@ def gradient_colours(count: int) -> list[str]:
     return out
 
 
-def toggle_image(on: bool, hover: bool = False, bg: str = theme.PANEL) -> ImageTk.PhotoImage:
-    """Унтраалгын зураг (40×22). Кэшлэнэ — Tk зургийн лавлагааг барих ёстой."""
-    key = ("toggle", on, hover, bg)
+def toggle_image(
+    on: bool, hover: bool = False, bg: str = theme.PANEL, focused: bool = False
+) -> ImageTk.PhotoImage:
+    """Унтраалгын зураг (40×22). Кэшлэнэ — Tk зургийн лавлагааг барих ёстой.
+
+    Фокусын хүрээг зурган дотор зурна: Tk-ийн `highlightthickness` нь `Entry`
+    дээр ажилладаг ч `Label` дээр огт зурагддаггүй (пикселээр хэмжсэн), энэ
+    унтраалга нь Label юм.
+    """
+    key = ("toggle", on, hover, bg, focused)
     cached = _image_cache.get(key)
     if cached is not None:
         return cached
@@ -321,9 +366,22 @@ def toggle_image(on: bool, hover: bool = False, bg: str = theme.PANEL) -> ImageT
         track = _lighten(track, 0.12)
     knob = theme.KNOB_ON if on else theme.KNOB_OFF
 
-    _rounded(draw, (0, 0, width * scale - 1, height * scale - 1), height * scale / 2, track)
-    knob_size = 16 * scale
-    inset = 3 * scale
+    # Фокустай үед мөрийг гаднаас нь хүрээлнэ — зам нь өөрөө нарийсна.
+    inset_track = theme.FOCUS_WIDTH * scale if focused else 0
+    if focused:
+        _rounded(
+            draw, (0, 0, width * scale - 1, height * scale - 1),
+            height * scale / 2, theme.FOCUS,
+        )
+    _rounded(
+        draw,
+        (inset_track, inset_track,
+         width * scale - 1 - inset_track, height * scale - 1 - inset_track),
+        (height * scale - 2 * inset_track) / 2,
+        track,
+    )
+    knob_size = 16 * scale - 2 * inset_track
+    inset = 3 * scale + inset_track
     left = (width * scale - knob_size - inset) if on else inset
     draw.ellipse((left, inset, left + knob_size, inset + knob_size), fill=knob)
 
@@ -339,12 +397,14 @@ class Toggle(tk.Label):
         super().__init__(parent, bd=0, highlightthickness=0, bg=bg, cursor="hand2")
         self._value = bool(value)
         self._hover = False
+        self._focused = False
         self._bg = bg
         self.command = command
         self._redraw()
         self.bind("<Button-1>", self._clicked)
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
+        focusable(self, self._clicked, paint=self._set_focus)
 
     @property
     def value(self) -> bool:
@@ -355,7 +415,13 @@ class Toggle(tk.Label):
         self._redraw()
 
     def _redraw(self) -> None:
-        self.configure(image=toggle_image(self._value, self._hover, self._bg))
+        self.configure(
+            image=toggle_image(self._value, self._hover, self._bg, self._focused)
+        )
+
+    def _set_focus(self, focused: bool) -> None:
+        self._focused = focused
+        self._redraw()
 
     def _clicked(self, _event=None) -> None:
         self._value = not self._value
@@ -612,6 +678,7 @@ class NavButton(tk.Frame):
         self.command = command
         self._active = False
         self._hover = False
+        self._focused = False
         self._photo: ImageTk.PhotoImage | None = None
         self._size = (0, 0)
 
@@ -629,6 +696,15 @@ class NavButton(tk.Frame):
             widget.bind("<Enter>", self._enter)
             widget.bind("<Leave>", self._leave)
         self.bind("<Configure>", self._resized)
+        # Фокус нь эцэг Frame дээр очно — дүрс, шошго хоёр тусдаа зогсоол
+        # болбол нэг цэс дээр Tab гурав дарах хэрэгтэй болно.
+        for widget in (self.icon, self.label, self._back):
+            widget.configure(takefocus=False)
+        focusable(self, lambda _e: self.command(), paint=self._set_focus)
+        self._paint()
+
+    def _set_focus(self, focused: bool) -> None:
+        self._focused = focused
         self._paint()
 
     def set_active(self, active: bool) -> None:
@@ -685,6 +761,14 @@ class NavButton(tk.Frame):
             draw.rounded_rectangle(
                 (3, 8, 5, height - 9), radius=1, fill=theme.GRADIENT[2]
             )
+        if self._focused:
+            # Tk нь Frame/Label дээр фокусын хүрээ зурдаггүй тул дэвсгэр
+            # зурган дотроо зурна. Идэвхтэйн зураасаас ялгаатай: энэ нь
+            # «Tab энд байна», тэр нь «энэ хуудас нээлттэй» гэсэн үг.
+            ImageDraw.Draw(image).rounded_rectangle(
+                (0, 0, width - 1, height - 1),
+                radius=radius, outline=theme.FOCUS, width=theme.FOCUS_WIDTH,
+            )
         self._photo = ImageTk.PhotoImage(image)
         self._back.configure(image=self._photo)
 
@@ -708,8 +792,15 @@ class StatTile(RoundedBox):
         self.value_var.set(value)
 
 
-def knob_image(bg: str, focused: bool = False) -> ImageTk.PhotoImage:
-    key = ("knob", bg, focused)
+def knob_image(bg: str) -> ImageTk.PhotoImage:
+    """Гулсуурын цагаан бариул.
+
+    Фокусыг бариулын өнгөөр биш, Canvas-ийн хүрээгээр харуулна: өмнө нь фокус
+    ирэхэд бариул цагаанаас акцент цэнхэр болдог байсан нь урвуу дохио байв —
+    фокустай үед харагдац нь СУЛРАХ ёсгүй. Хүрээ нь мөн аппын бусад бүх
+    удирдлагатай ижил хэл болно.
+    """
+    key = ("knob", bg)
     cached = _image_cache.get(key)
     if cached is not None:
         return cached
@@ -717,12 +808,8 @@ def knob_image(bg: str, focused: bool = False) -> ImageTk.PhotoImage:
     img = Image.new("RGB", (size * scale, size * scale), bg)
     draw = ImageDraw.Draw(img)
     edge = 1 * scale
-    draw.ellipse(
-        (0, 0, size * scale - 1, size * scale - 1),
-        fill=theme.ACCENT if focused else theme.KNOB_ON,
-    )
-    if not focused:
-        draw.ellipse((edge, edge, size * scale - 1 - edge, size * scale - 1 - edge), fill="#FFFFFF")
+    draw.ellipse((0, 0, size * scale - 1, size * scale - 1), fill=theme.KNOB_ON)
+    draw.ellipse((edge, edge, size * scale - 1 - edge, size * scale - 1 - edge), fill="#FFFFFF")
     photo = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
     _image_cache[key] = photo
     return photo
@@ -762,7 +849,9 @@ class Slider(tk.Frame):
 
         self.canvas = tk.Canvas(
             self, width=self.LENGTH, height=self.HEIGHT, bg=bg,
-            highlightthickness=0, bd=0, cursor="hand2", takefocus=True,
+            bd=0, cursor="hand2", takefocus=True,
+            highlightthickness=theme.FOCUS_WIDTH,
+            highlightbackground=bg, highlightcolor=theme.FOCUS,
         )
         self.canvas.pack(side="right")
         middle = self.HEIGHT / 2
@@ -780,8 +869,6 @@ class Slider(tk.Frame):
         self.canvas.bind("<ButtonRelease-1>", lambda _e: self._settled())
         self.canvas.bind("<Left>", lambda _e: self._nudge(-1))
         self.canvas.bind("<Right>", lambda _e: self._nudge(+1))
-        self.canvas.bind("<FocusIn>", lambda _e: self._paint_knob(True))
-        self.canvas.bind("<FocusOut>", lambda _e: self._paint_knob(False))
         self._paint()
 
     @property
@@ -815,9 +902,6 @@ class Slider(tk.Frame):
         self.canvas.coords(self._fill, self.PAD, middle - 2, x, middle + 2)
         self.canvas.coords(self._knob, x, middle)
         self.readout.configure(text=self.fmt(self._value))
-
-    def _paint_knob(self, focused: bool) -> None:
-        self.canvas.itemconfigure(self._knob, image=knob_image(self._bg, focused))
 
     def _settled(self) -> None:
         if self.command:
@@ -1032,12 +1116,24 @@ class Link(tk.Label):
 
     def __init__(self, parent, text: str, command, bg: str = theme.BG, font=None) -> None:
         super().__init__(
-            parent, text=text, bg=bg, fg=theme.ACCENT, font=font or theme.UI_SMALL,
+            parent, text=text, bg=bg, fg=theme.LINK, font=font or theme.UI_SMALL,
             cursor="hand2",
         )
+        self._font = font or theme.UI_SMALL
         self.bind("<Button-1>", lambda _e: command())
-        self.bind("<Enter>", lambda _e: self.configure(fg=_lighten(theme.ACCENT, 0.25)))
-        self.bind("<Leave>", lambda _e: self.configure(fg=theme.ACCENT))
+        self.bind("<Enter>", lambda _e: self.configure(fg=_lighten(theme.LINK, 0.25)))
+        self.bind("<Leave>", lambda _e: self.configure(fg=theme.LINK))
+        focusable(self, lambda _e: command(), paint=self._set_focus)
+
+    def _set_focus(self, focused: bool) -> None:
+        """Фокусыг доогуур зураасаар — холбоосны уламжлалт тэмдэг.
+
+        `Label` дээр Tk фокусын хүрээ зурдаггүй тул өөрсдөө тэмдэглэнэ.
+        """
+        self.configure(
+            fg=theme.FOCUS if focused else theme.LINK,
+            font=(*self._font, "underline") if focused else self._font,
+        )
 
 
 class Button(RoundedLabel):
@@ -1055,12 +1151,30 @@ class Button(RoundedLabel):
         )
         self._danger = danger
         self._base = bg
+        self._focused = False
         self.bind("<Button-1>", lambda _e: command())
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
+        focusable(self, lambda _e: command(), paint=self._set_focus)
 
     def set_text(self, text: str) -> None:
         self.restyle(text=text)
+
+    def _idle_border(self) -> str:
+        return theme.FOCUS if self._focused else theme.BORDER
+
+    def _idle_fg(self) -> str:
+        return theme.FOCUS if self._focused else theme.TEXT
+
+    def _set_focus(self, focused: bool) -> None:
+        """Фокусыг хүрээ БА бичгийн өнгө хоёулангаар нь тэмдэглэнэ.
+
+        Зөвхөн хүрээнд найдаж болохгүй: энэ товчны `padx/pady` нь дугуй
+        дэвсгэр зургийн ирмэгийг тайрдаг тул хүрээ нь бодитоор харагдахгүй
+        байх боломжтой (пикселээр хэмжсэн). Бичгийн өнгө үргэлж харагдана.
+        """
+        self._focused = focused
+        self.restyle(border=self._idle_border(), fg=self._idle_fg())
 
     def _enter(self, _event=None) -> None:
         if self._danger:
@@ -1069,7 +1183,7 @@ class Button(RoundedLabel):
             self.restyle(fill=theme.HOVER)
 
     def _leave(self, _event=None) -> None:
-        self.restyle(fill=self._base, border=theme.BORDER, fg=theme.TEXT)
+        self.restyle(fill=self._base, border=self._idle_border(), fg=self._idle_fg())
 
 
 class SearchBox(RoundedBox):
@@ -1089,7 +1203,9 @@ class SearchBox(RoundedBox):
         self.entry = tk.Entry(
             self.inner, textvariable=variable, bg=bg, fg=theme.TEXT,
             insertbackground=theme.TEXT, relief="flat", font=theme.UI_SMALL,
-            highlightthickness=0, bd=0,
+            bd=0,
+            highlightthickness=theme.FOCUS_WIDTH,
+            highlightbackground=bg, highlightcolor=theme.FOCUS,
         )
         self.entry.pack(side="left", fill="x", expand=True, padx=(0, 4), pady=5)
 

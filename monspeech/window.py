@@ -838,8 +838,10 @@ class ControlWindow:
         holder.pack(fill="both", expand=True, padx=theme.PAGE_PAD_X)
         self.history_box = tk.Listbox(
             holder.inner, bg=theme.PANEL, fg=theme.TEXT, selectbackground=theme.NAV_ACTIVE,
-            selectforeground=theme.TEXT, highlightthickness=0, relief="flat",
+            selectforeground=theme.TEXT, relief="flat",
             font=theme.UI, activestyle="none", height=12, bd=0,
+            highlightthickness=theme.FOCUS_WIDTH,
+            highlightbackground=theme.PANEL, highlightcolor=theme.FOCUS,
         )
         bar = scrollbar(holder.inner, self.history_box.yview, trough=theme.PANEL)
         bar.pack(side="right", fill="y")
