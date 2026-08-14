@@ -147,6 +147,10 @@ SEARCH_INDEX = [
     ("Лог ба хувилбар", 6, "лог хувилбар version log"),
 ]
 
+#: Сэдвийн тохиргооны нэр → цонхонд харагдах нэр.
+THEME_NAMES = {"dark": "Харанхуй", "light": "Гэрэлтэй"}
+THEME_CODES = {title: code for code, title in THEME_NAMES.items()}
+
 ORB_MODES = {"listening": "listening", "working": "recognizing"}
 LEVEL_FULL = 3200.0  # энэ RMS-ийг 100% гэж үзнэ
 DICTIONARY_SAVE_MS = 500  # толь засварлахад хүлээх хугацаа
@@ -664,6 +668,9 @@ class ControlWindow:
 
         self.stt = SttCard(page, self.app.cfg, self.app.on_stt_changed)
 
+    def _theme_changed(self) -> None:
+        self.app.on_theme_changed(THEME_CODES.get(self.theme_var.get(), "dark"))
+
     def _lang_changed(self) -> None:
         self.app.on_lang_changed(NAME_TO_CODE[self.lang_var.get()])
         self._paint_lang_chips()
@@ -894,6 +901,14 @@ class ControlWindow:
             )
             slider.pack()
             self.sliders[key] = slider
+
+        page.group("Харагдац")
+        card = Card(page.body)
+        _, holder = card.row("Өнгөний сэдэв", "Дахин эхлүүлэхэд идэвхжинэ")
+        self.theme_var = tk.StringVar(value=THEME_NAMES.get(theme.name, THEME_NAMES["dark"]))
+        combo(
+            holder, self.theme_var, list(THEME_NAMES.values()), self._theme_changed
+        )
 
         page.group("Систем")
         card = Card(page.body)

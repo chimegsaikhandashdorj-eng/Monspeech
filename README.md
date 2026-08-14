@@ -297,7 +297,7 @@ powershell -NoProfile -File tools\create_shortcut.ps1
 | [monspeech/widgets.py](monspeech/widgets.py) | Захиалгат виджетүүд (унтраалга, гулсуур, карт, keycap) |
 | [monspeech/orb.py](monspeech/orb.py) | «Төлөв» хуудасны робот (Pillow зураг + tk.Canvas) |
 | [monspeech/icons.py](monspeech/icons.py) | Цэсний шугаман дүрснүүд |
-| [monspeech/theme.py](monspeech/theme.py) | Дизайны токенууд (өнгө, фонт, хэмжээс, фокус) |
+| [monspeech/theme.py](monspeech/theme.py) | Дизайны токенууд: харанхуй/гэрэлтэй сэдэв, зайн шатлал, фокус |
 | [monspeech/pipeline.py](monspeech/pipeline.py) | Дуу → текст → курсор гэсэн ажлын thread |
 | [monspeech/instance.py](monspeech/instance.py) | Ганц хуулбар барих, дүрсээс цонх нээх дохио |
 | [monspeech/autostart.py](monspeech/autostart.py) | Windows-тай хамт эхлүүлэх (бүртгэлийн Run) |

@@ -94,6 +94,9 @@ class FakeApp:
     def on_mic_changed(self, index):
         self.cfg["mic_index"] = index
 
+    def on_theme_changed(self, code):
+        self.cfg["theme"] = code
+
     def on_option_changed(self, key, value):
         self.cfg[key] = bool(value)
 
@@ -382,6 +385,15 @@ check("цэсний дүрс тусдаа зогсоол биш", int(nav.icon.c
 
 check("гулсуурт хүрээ бий", int(ui.sliders["silence_hold"].canvas.cget("highlightthickness")) > 0, True)
 check("хайлтын талбарт хүрээ бий", int(ui.search.entry.cget("highlightthickness")) > 0, True)
+
+# --- Сэдэв сонгох ---
+check("сэдвийн сонголт бий", ui.theme_var.get(), "Харанхуй")
+ui.theme_var.set("Гэрэлтэй")
+ui._theme_changed()
+check("сэдэв тохиргоонд хадгалагдав", app.cfg["theme"], "light")
+ui.theme_var.set("Харанхуй")
+ui._theme_changed()
+check("буцаад харанхуй", app.cfg["theme"], "dark")
 
 # --- Гүйлгэгч гарч ирэхэд агуулгын өргөн хэлбэлзэхгүй ---
 # Урт тайлбартай мөр нэмэхэд өмнө нь цонх хоёр өргөний хооронд төгсгөлгүй

@@ -400,6 +400,18 @@ class MonspeechApp:
         log.info("танигч солигдлоо: %s", self.cfg["stt_provider"])
         self.ui.set_detail(f"Танигч: {title}")
 
+    def on_theme_changed(self, code: str) -> None:
+        """Өнгөний сэдэв солигдлоо.
+
+        Шууд хэрэглэж чадахгүй: виджетүүд өнгөө импортын үед анхны утга болгон
+        авдаг тул зөвхөн дахин эхлүүлэхэд идэвхжинэ. Үүнийг шулуун хэлнэ —
+        сольсон мөртлөө юу ч болохгүй бол хэрэглэгч эвдэрсэн гэж бодно.
+        """
+        self.cfg["theme"] = code
+        self.cfg.save()
+        log.info("сэдэв солигдлоо: %s (дахин эхлүүлэхэд идэвхжинэ)", code)
+        self.ui.set_detail("Сэдэв хадгалагдлаа — дахин эхлүүлэхэд идэвхжинэ.")
+
     def on_mic_changed(self, index: int) -> None:
         self.cfg["mic_index"] = index
         self.recorder.device_index = None if index < 0 else index
