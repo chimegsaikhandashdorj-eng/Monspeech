@@ -22,12 +22,13 @@ import webbrowser
 
 import pyperclip
 
-from . import __version__, autostart, recognizer, update, winfocus
-from .audio import MIN_THRESHOLD, Recorder, input_device_name
+from . import __version__, autostart, mics, recognizer, update, winfocus
+from .audio import MIN_THRESHOLD, Recorder
 from .config import Config
 from .history import InsertionHistory
 from .hotkeys import HotkeyManager, parse_combo, pretty
 from .instance import ShowListener, already_running, request_show
+from .mics import Mic
 from .logging_setup import LOG_PATH, get as get_logger, install_crash_handler
 from .overlay import WaveOverlay
 from .pipeline import RecognitionWorker
@@ -79,12 +80,17 @@ class MonspeechApp:
             self.formatter.remember(str(entry.get("text") or ""))
         self.recognizer = recognizer.create(self.cfg)
         self.target = TargetWindow()
+        # Хуучин тохиргоонд нэр байхгүй тул эхлэхдээ нэг удаа нөхнө — эс бөгөөс
+        # «нэрээр нь олох» нь микрофоноо дахин сонгосон хүнд л ажиллана.
+        mic = mics.load(self.cfg)
+        if mic != mics.Mic(int(self.cfg["mic_index"]), str(self.cfg["mic_name"])):
+            mic.save_to(self.cfg)
+            self.cfg.save()
         self.recorder = Recorder(
             on_segment=self._on_segment,
             on_level=self._on_level,
             on_error=self._on_audio_error,
-            device_index=self._device_index(),
-            device_name=str(self.cfg["mic_name"]),
+            mic=mic,
             max_seconds=float(self.cfg["max_recording_seconds"]),
             silence_hold=float(self.cfg["silence_hold"]),
             keep_open_seconds=float(self.cfg["mic_keep_open_seconds"]),
@@ -163,29 +169,22 @@ class MonspeechApp:
     # ------------------------------------------------------------------
     # Микрофон
     # ------------------------------------------------------------------
-    def _device_index(self):
-        index = int(self.cfg["mic_index"])
-        return None if index < 0 else index
-
     @staticmethod
-    def list_microphones() -> tuple[list[str], list[int]]:
-        names = ["Системийн үндсэн"]
-        indexes = [-1]
-        try:
-            import pyaudio
+    def microphones() -> list[Mic]:
+        """Сонгож болох микрофонууд — эхнийх нь үргэлж системийн үндсэн."""
+        return mics.available()
 
-            pa = pyaudio.PyAudio()
-            try:
-                for i in range(pa.get_device_count()):
-                    info = pa.get_device_info_by_index(i)
-                    if int(info.get("maxInputChannels", 0)) > 0:
-                        names.append(str(info.get("name", f"#{i}"))[:38])
-                        indexes.append(i)
-            finally:
-                pa.terminate()
-        except Exception:  # noqa: BLE001 - жагсаалт гаргаж чадахгүй ч апп ажиллана
-            pass
-        return names, indexes
+    def _mic_notice(self) -> str:
+        """Сонгосон микрофоны ОРОНД өөр төхөөрөмж нээгдсэн бол хэлэх үг.
+
+        Чимээгүй шилжвэл хүн чихэвчээрээ ярьж байгаад суурин микрофоноор
+        бичигдсэнээ мэдэхгүй өнгөрнө. Нэрээр нь олдсон бол (дугаар нь шилжсэн
+        ч ЯГ тэр төхөөрөмж) дуугарах шаардлагагүй — логонд л үлдэнэ.
+        """
+        mic = self.recorder.mic
+        if mic.is_default or self.recorder.active_index is not None:
+            return ""
+        return f"«{mic.label}» олдсонгүй — системийн үндсэн микрофоноор бичиж байна."
 
     # ------------------------------------------------------------------
     # Дуу таних дамжлага
@@ -342,9 +341,14 @@ class MonspeechApp:
             f"Хэл: {self.cfg['lang']} / {self.cfg['lang_alt']}",
             # Сонгосон нь ба ҮНЭХЭЭР нээгдсэн нь: хоёр нь зөрсөн бол
             # төхөөрөмжийн дугаар шилжсэн гэсэн үг — оношилгооны гол мөр.
-            f"Микрофон: {self.cfg['mic_index']} "
-            f"{self.cfg['mic_name'] or '(системийн үндсэн)'} "
-            f"→ нээгдсэн: {self.recorder.active_index}",
+            # Төхөөрөмжийн нэр нь хүний нэр агуулж мэднэ («Dash's Buds») тул
+            # энд зөвхөн дугаарууд орно — энэ текстийг хүн рүү явуулдаг.
+            f"Микрофон: №{self.recorder.mic.index} → "
+            + (
+                f"нээгдсэн №{self.recorder.active_index}"
+                if self.recorder.stream_open
+                else "хаалттай"
+            ),
             f"Толь: {len(self.cfg['replacements'])} үг, {len(self.cfg['snippets'])} товчлол",
             f"Лог: {LOG_PATH}",
         ]
@@ -417,14 +421,11 @@ class MonspeechApp:
         log.info("сэдэв солигдлоо: %s (дахин эхлүүлэхэд идэвхжинэ)", code)
         self.ui.set_detail("Сэдэв хадгалагдлаа — дахин эхлүүлэхэд идэвхжинэ.")
 
-    def on_mic_changed(self, index: int) -> None:
+    def on_mic_changed(self, mic: Mic) -> None:
         # Дугаарын хажуугаар нэрийг нь хадгална: чихэвч салгаж холбоход дугаар
-        # шилждэг тул дараа нь нэрээр нь дахин олно (audio.resolve_input_device).
-        name = input_device_name(index)
-        self.cfg["mic_index"] = index
-        self.cfg["mic_name"] = name
-        self.recorder.device_index = None if index < 0 else index
-        self.recorder.device_name = name
+        # шилждэг тул дараа нь нэрээр нь дахин олно (`mics.resolve`).
+        mic.save_to(self.cfg)
+        self.recorder.mic = mic
         self.recorder.close()  # шинэ төхөөрөмжөөр дахин нээгдэнэ
         self.cfg.save()
         self.ui.set_detail("Микрофон солигдлоо.")
@@ -688,6 +689,13 @@ class MonspeechApp:
         if self.cfg["wave_overlay"]:
             self.overlay.show()
         self._refresh_status()
+        # Сонгосон микрофоны оронд өөр төхөөрөмж нээгдсэнийг чимээгүй өнгөрөөж
+        # болохгүй — хүн ямар микрофоноор бичиж байгаагаа мэдэх ёстой
+        notice = self._mic_notice()
+        if notice:
+            self.ui.set_detail(notice)
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash(notice, kind="warning")
         # Админ эрхтэй цонхонд текст чимээгүйгээр ордоггүй — урьдчилан хэлнэ
         if self.target.blocked():
             warning = "Энэ цонх админ эрхтэй байж магадгүй — текст орохгүй байж болно."

@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import tkinter as tk
 
-from monspeech import config as config_module
+from monspeech import config as config_module, mics
 from monspeech.config import Config
 
 fails = []
@@ -73,8 +73,8 @@ class FakeApp:
         self.tuning = {}
 
     @staticmethod
-    def list_microphones():
-        return ["Системийн үндсэн", "Микрофон (Realtek)"], [-1, 3]
+    def microphones():
+        return [mics.SYSTEM, mics.Mic(3, "Микрофон (Realtek)")]
 
     def toggle(self):
         pass
@@ -91,8 +91,8 @@ class FakeApp:
     def on_alt_lang_changed(self, code):
         self.cfg["lang_alt"] = code
 
-    def on_mic_changed(self, index):
-        self.cfg["mic_index"] = index
+    def on_mic_changed(self, mic):
+        mic.save_to(self.cfg)
 
     def on_theme_changed(self, code):
         self.cfg["theme"] = code

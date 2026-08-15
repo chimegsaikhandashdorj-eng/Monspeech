@@ -18,7 +18,9 @@ except ImportError:  # pragma: no cover - хувилбараас хамаарн�
 
 import pyaudio
 
+from . import mics
 from .logging_setup import get as get_logger
+from .mics import Mic
 
 log = get_logger("audio")
 
@@ -44,76 +46,6 @@ NOISE_CEILING = 2500.0
 # Буруу хэмжилтийг өөрөө засах: ийм удаан яриа олдохгүй байвал босгыг буулгана
 RECALIBRATE_AFTER = 1.4
 RECALIBRATE_RATIO = 0.35
-
-
-# ----------------------------------------------------------------------
-# Төхөөрөмж сонгох
-# ----------------------------------------------------------------------
-def _input_channels(pa, index: int) -> int:
-    """Тухайн дугаарын төхөөрөмж хэдэн сувгаар СОНСОЖ чадахыг буцаана."""
-    try:
-        info = pa.get_device_info_by_index(index)
-    except Exception:  # noqa: BLE001 - дугаар хүрээнээс гарсан бол PyAudio шиднэ
-        return 0
-    try:
-        return int(info.get("maxInputChannels", 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _device_name(pa, index: int) -> str:
-    try:
-        return str(pa.get_device_info_by_index(index).get("name", ""))
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def resolve_input_device(pa, index: int | None, name: str = "") -> int | None:
-    """Хадгалсан дугаарыг ОДООГИЙН төхөөрөмжийн жагсаалттай тааруулна.
-
-    PyAudio-ийн дугаар нь тогтвортой биш: чихэвч салгаж холбоход жагсаалт
-    шинэчлэгдэж, өчигдрийн «1» өнөөдөр өөр төхөөрөмж — эсвэл огт сонсдоггүй
-    чанга яригч — болно. Тэр дугаараар нээхэд PortAudio нь «Invalid number of
-    channels» (-9998) гэж шиднэ: сонсох суваг нь тэг учраас. Хэрэглэгчийн хувьд
-    энэ нь «микрофон гэнэт ажиллахаа больсон» гэсэн үг.
-
-    Иймд нэрээр нь дахин олно, олдохгүй бол системийн үндсэн микрофон руу
-    (`None`) буцна — ажиллахгүй байхаас өөр микрофоноор ажилласан нь дээр.
-    """
-    if index is None or index < 0:
-        return None
-    if _input_channels(pa, index) >= CHANNELS and (
-        not name or _device_name(pa, index) == name
-    ):
-        return index
-
-    if name:
-        try:
-            count = pa.get_device_count()
-        except Exception:  # noqa: BLE001
-            count = 0
-        for i in range(count):
-            if _input_channels(pa, i) >= CHANNELS and _device_name(pa, i) == name:
-                return i
-    return None
-
-
-def input_device_name(index: int) -> str:
-    """Дугаараар нь төхөөрөмжийн нэрийг олно (тохиргоонд хадгалахад)."""
-    if index is None or index < 0:
-        return ""
-    try:
-        pa = pyaudio.PyAudio()
-    except Exception:  # noqa: BLE001
-        return ""
-    try:
-        return _device_name(pa, index)
-    finally:
-        try:
-            pa.terminate()
-        except Exception:  # noqa: BLE001
-            pass
-
 
 # Дуу цэгцлэх
 TRIM_PADDING = 0.12  # эхэнд үлдээх зай
@@ -370,6 +302,16 @@ class Segmenter:
         return pcm
 
 
+def _new_pyaudio():
+    """PyAudio үүсгэх ЦОРЫН ГАНЦ газар.
+
+    Тест энд өөрийн хуурамчийг тавьж, микрофонгүйгээр нөөц замыг (сонголт
+    олдохгүй → үндсэн рүү) шалгана. Эс бөгөөс тэр зам зөвхөн жинхэнэ чихэвч
+    салгаж байж шалгагдана — өөрөөр хэлбэл хэзээ ч шалгагдахгүй.
+    """
+    return pyaudio.PyAudio()
+
+
 class Recorder:
     """Микрофоныг асааж, өгүүлбэр бүрийг callback руу дамжуулна.
 
@@ -385,8 +327,7 @@ class Recorder:
         on_segment,
         on_level=None,
         on_error=None,
-        device_index: int | None = None,
-        device_name: str = "",
+        mic: Mic = mics.SYSTEM,
         max_seconds: float = 300.0,
         silence_hold: float = SILENCE_HOLD,
         keep_open_seconds: float = 45.0,
@@ -394,10 +335,10 @@ class Recorder:
         self.on_segment = on_segment
         self.on_level = on_level
         self.on_error = on_error
-        self.device_index = device_index
-        self.device_name = device_name
-        # Хамгийн сүүлд ҮНЭХЭЭР нээгдсэн дугаар (лог, оношилгоонд)
-        self.active_index: int | None = device_index
+        self.mic = mic
+        # Хамгийн сүүлд нээхээр оролдсон дугаар (`None` = системийн үндсэн).
+        # Урсгал нээлттэй үед л утга нь үнэн — `stream_open`-той хамт уншина.
+        self.active_index: int | None = None
         self.max_seconds = max_seconds
         self.keep_open_seconds = keep_open_seconds
         self._pa: pyaudio.PyAudio | None = None
@@ -430,18 +371,22 @@ class Recorder:
     def _friendly_error(exc: Exception) -> str:
         """PyAudio-ийн техникийн алдааг ойлгомжтой болгоно."""
         text = str(exc).lower()
-        if "no default input" in text or "invalid input device" in text:
+        # «number of channels» нь -9998: сонсох суваггүй төхөөрөмж рүү хандсан
+        # — чихэвч салсан эсвэл жагсаалт хоосон гэсэн үг, өөрөөр хэлбэл
+        # микрофон олдоогүйн бас нэг дүр.
+        if (
+            "no default input" in text
+            or "invalid input device" in text
+            or "number of channels" in text
+        ):
             return "Микрофон олдсонгүй — чихэвч/микрофоноо холбоод дахин оролдоно уу."
         if "device unavailable" in text or "invalid device" in text:
             return "Сонгосон микрофон боломжгүй байна — Тохиргооноос өөрийг сонгоно уу."
         if "access" in text or "denied" in text:
             return "Микрофон ашиглах зөвшөөрөл алга — Windows-ийн Нууцлалын тохиргоог шалгана уу."
-        # -9998: сонгосон төхөөрөмж нь сонсдоггүй (чихэвч салсан, дугаар хуучирсан)
-        if "number of channels" in text:
-            return "Микрофон олдсонгүй — чихэвч/микрофоноо холбоод дахин оролдоно уу."
         return f"Микрофон нээгдсэнгүй: {exc}"
 
-    def _open(self, index: int | None):
+    def _open_device(self, index: int | None):
         return self._pa.open(
             format=FORMAT,
             channels=CHANNELS,
@@ -453,35 +398,37 @@ class Recorder:
 
     def _open_stream(self) -> str | None:
         try:
-            self._pa = pyaudio.PyAudio()
+            self._pa = _new_pyaudio()
         except Exception as exc:  # noqa: BLE001 - PyAudio янз бүрийн алдаа шиднэ
             self._cleanup()
             return self._friendly_error(exc)
 
-        index = resolve_input_device(self._pa, self.device_index, self.device_name)
-        if index != self.device_index:
+        index = mics.resolve(self._pa, self.mic)
+        self.active_index = index
+        if not self.mic.is_default and index != self.mic.index:
             log.warning(
-                "сонгосон микрофон (%s «%s») олдсонгүй — %s руу шилжлээ",
-                self.device_index,
-                self.device_name,
+                "сонгосон микрофон («%s», №%s) олдсонгүй — %s руу шилжлээ",
+                self.mic.name,
+                self.mic.index,
                 "системийн үндсэн" if index is None else index,
             )
         try:
-            self._stream = self._open(index)
+            self._stream = self._open_device(index)
         except Exception as exc:  # noqa: BLE001
             if index is None:
+                self.active_index = None
                 self._cleanup()
                 return self._friendly_error(exc)
             # Жагсаалт зөв мэдээлсэн ч нээлт бүтсэнгүй: системийн үндсэнээр
             # сүүлчийн оролдлого хийнэ — огт бичихгүй байхаас арай дээр.
             log.warning("микрофон %s нээгдсэнгүй (%s) — үндсэнээр оролдож байна", index, exc)
             try:
-                self._stream = self._open(None)
+                self._stream = self._open_device(None)
             except Exception:  # noqa: BLE001
+                self.active_index = None
                 self._cleanup()
                 return self._friendly_error(exc)
-            index = None
-        self.active_index = index
+            self.active_index = None
         return None
 
     def start(self) -> str | None:

@@ -542,10 +542,9 @@ class ControlWindow:
         card = Card(page.body)
         self.welcome = card
 
-        names, _ = self.app.list_microphones()
-        # Эхний нэр нь үргэлж «Системийн үндсэн» тул жинхэнэ төхөөрөмж
+        # Эхнийх нь үргэлж «Системийн үндсэн» тул жинхэнэ төхөөрөмж
         # илэрсэн эсэхийг үлдсэнээр нь мэднэ.
-        found = len(names) - 1
+        found = len(self.app.microphones()) - 1
         _, holder = card.row(
             "1. Микрофон",
             f"{found} төхөөрөмж илэрлээ" if found else "Төхөөрөмж илрээгүй — залгаад шалгана уу",
@@ -643,9 +642,9 @@ class ControlWindow:
         )
 
         _, holder = card.row("Микрофон", "Системийн үндсэн төхөөрөмжийг дагана")
-        self.mic_names, self.mic_indexes = self.app.list_microphones()
-        self.mic_var = tk.StringVar(value=self._current_mic_name())
-        combo(holder, self.mic_var, self.mic_names, self._mic_changed)
+        self.mics = self.app.microphones()
+        self.mic_var = tk.StringVar(value=self._current_mic_label())
+        combo(holder, self.mic_var, [mic.label for mic in self.mics], self._mic_changed)
 
         _, holder = card.row("Оролтын түвшин", "Ярихад баганууд хөдөлж байвал зөв")
         self.meter = LevelMeter(holder)
@@ -1035,18 +1034,27 @@ class ControlWindow:
     # ------------------------------------------------------------------
     # Микрофон
     # ------------------------------------------------------------------
-    def _current_mic_name(self) -> str:
-        try:
-            return self.mic_names[self.mic_indexes.index(int(self.app.cfg["mic_index"]))]
-        except (ValueError, IndexError):
-            return self.mic_names[0]
+    def _current_mic_label(self) -> str:
+        """Хадгалсан сонголтыг жагсаалтаас олно.
+
+        Нэрээр нь эхэлж хайна: дугаар нь шилжсэн байж болох ч хэрэглэгчийн
+        сонгосон төхөөрөмж жагсаалтад байсаар байна.
+        """
+        saved = self.app.cfg["mic_name"], int(self.app.cfg["mic_index"])
+        for mic in self.mics:
+            if saved[0] and mic.name == saved[0]:
+                return mic.label
+        for mic in self.mics:
+            if mic.index == saved[1]:
+                return mic.label
+        return self.mics[0].label
 
     def _mic_changed(self) -> None:
-        try:
-            index = self.mic_indexes[self.mic_names.index(self.mic_var.get())]
-        except ValueError:
-            return
-        self.app.on_mic_changed(index)
+        chosen = self.mic_var.get()
+        for mic in self.mics:
+            if mic.label == chosen:
+                self.app.on_mic_changed(mic)
+                return
 
     # ------------------------------------------------------------------
     # Түүх

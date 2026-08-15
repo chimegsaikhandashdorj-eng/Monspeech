@@ -10,16 +10,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from monspeech import audio as audio_module, mics
 from monspeech.audio import (
+    CHANNELS,
     CHUNK,
     MIN_THRESHOLD,
     NOISE_CEILING,
     RATE,
+    Recorder,
     Segmenter,
     normalize,
     prepare_segment,
     remove_dc,
-    resolve_input_device,
     rms,
     trim_silence,
 )
@@ -203,37 +205,104 @@ prepared = prepare_segment(padded.tobytes(), RATE)
 check("бүрэн боловсруулалт богиносгоно", 0 < len(prepared) < len(padded) * 2, True)
 check("хоосон оролт", prepare_segment(b"", RATE), b"")
 
-# --- төхөөрөмж сонгох ---
-class FakePyAudio:
-    """PyAudio-ийн зөвхөн хэрэгтэй хэсгийг дуурайна (жинхэнэ микрофон хэрэггүй)."""
+# --- алдааны мессеж ---
+# -9998 бол «сонсох суваггүй төхөөрөмж рүү хандлаа» — техникийн текстээр нь
+# хэрэглэгчийг тарчлаахгүй
+friendly = Recorder._friendly_error(OSError(-9998, "Invalid number of channels"))
+check("-9998 ойлгомжтой болно", friendly.startswith("Микрофон олдсонгүй"), True)
+check(
+    "танихгүй алдааг нуухгүй",
+    Recorder._friendly_error(OSError("Something odd")),
+    "Микрофон нээгдсэнгүй: Something odd",
+)
 
-    def __init__(self, devices):
+# Бичлэгийн суваг ба төхөөрөмж шалгах суваг салж явбал сонсдог төхөөрөмжийг
+# «сонсдоггүй» гэж хаяна (mics модуль эргэлдсэн импортоос болж тусдаа тоотой)
+check("суваг тоо нийцнэ", CHANNELS, mics.MIN_CHANNELS)
+
+
+# --- урсгал нээх нөөц зам (микрофон хэрэггүй) ---
+class FakeStream:
+    def read(self, frames, exception_on_overflow=True):
+        return b"\x00\x00" * frames
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class FakePyAudio:
+    """PortAudio-ийн зан төлөв: сонсох суваггүй дугаар руу хандвал -9998.
+
+    Энэ нь таамаг биш — бодит төхөөрөмж дээр хэмжсэн зан төлөв.
+    """
+
+    def __init__(self, devices, refuse=()):
         self.devices = devices  # [(нэр, сонсох суваг), ...]
+        self.refuse = refuse  # жагсаалт зөв мөртлөө нээгдэхгүй дугаарууд
+        self.opened = []
 
     def get_device_count(self):
         return len(self.devices)
 
     def get_device_info_by_index(self, index):
         if index < 0 or index >= len(self.devices):
-            raise OSError("invalid device index")
+            raise OSError("Invalid device index")
         name, channels = self.devices[index]
         return {"name": name, "maxInputChannels": channels}
 
+    def _default_input(self):
+        for index, (_name, channels) in enumerate(self.devices):
+            if channels >= CHANNELS:
+                return index
+        return None
 
-headset = FakePyAudio([("Sound Mapper", 2), ("Headset", 1), ("Speakers", 0)])
-# Чихэвч салахад MME-ийн «Sound Mapper» сонсох суваггүй болдог
-unplugged = FakePyAudio([("Sound Mapper", 0), ("Speakers", 0)])
-# Дахин холбоход дугаар нь шилжсэн байна
-moved = FakePyAudio([("Sound Mapper", 2), ("Webcam", 1), ("Headset", 1)])
+    def open(self, input_device_index=None, channels=CHANNELS, **_kw):
+        target = input_device_index
+        if target is None:
+            target = self._default_input()
+        if target is None or self.devices[target][1] < channels or target in self.refuse:
+            raise OSError(-9998, "Invalid number of channels")
+        self.opened.append(input_device_index)
+        return FakeStream()
 
-check("үндсэнийг хөндөхгүй", resolve_input_device(headset, -1, ""), None)
-check("None хэвээр", resolve_input_device(headset, None, ""), None)
-check("зөв дугаарыг хэвээр", resolve_input_device(headset, 1, "Headset"), 1)
-check("нэргүй хуучин тохиргоо", resolve_input_device(headset, 1, ""), 1)
-check("шилжсэн дугаарыг нэрээр олно", resolve_input_device(moved, 1, "Headset"), 2)
-check("сонсдоггүй төхөөрөмж → үндсэн", resolve_input_device(headset, 2, "Speakers"), None)
-check("салсан төхөөрөмж → үндсэн", resolve_input_device(unplugged, 1, "Headset"), None)
-check("хүрээнээс гарсан дугаар → үндсэн", resolve_input_device(headset, 9, ""), None)
+
+def record_with(devices, mic, refuse=()):
+    """Хуурамч төхөөрөмжийн хүснэгт дээр нэг удаа бичиж үзнэ."""
+    fake = FakePyAudio(devices, refuse)
+    original = audio_module._new_pyaudio
+    audio_module._new_pyaudio = lambda: fake
+    try:
+        recorder = audio_module.Recorder(
+            on_segment=lambda pcm, final: None, mic=mic, keep_open_seconds=0.0
+        )
+        error = recorder.start()
+        recorder.stop()
+        recorder.close()
+        return error, recorder.active_index
+    finally:
+        audio_module._new_pyaudio = original
+
+
+MAPPER = ("Microsoft Sound Mapper - Input", 2)
+HEADSET = ("Headset (AWEI)", 1)
+SPEAKERS = ("Speakers", 0)
+headset_mic = mics.Mic(1, "Headset (AWEI)")
+
+# Дугаар шилжсэн: хадгалсан №1 нь одоо чанга яригч, чихэвч №2 дээр
+error, opened = record_with([MAPPER, SPEAKERS, HEADSET], headset_mic)
+check("шилжсэн дугаараас сэргэнэ", (error, opened), (None, 2))
+
+# Жагсаалт зөв мөртлөө нээлт бүтсэнгүй → системийн үндсэнээр дахин оролдоно
+error, opened = record_with([MAPPER, HEADSET, SPEAKERS], headset_mic, refuse=(1,))
+check("нээлт унавал үндсэнээр", (error, opened), (None, None))
+
+# Сонсох төхөөрөмж огт үлдээгүй: бичих боломжгүй ч мессеж нь ойлгомжтой байх ёстой
+error, opened = record_with([("Sound Mapper", 0), SPEAKERS], headset_mic)
+check("төхөөрөмжгүй бол ойлгомжтой алдаа", error.startswith("Микрофон олдсонгүй"), True)
+check("төхөөрөмжгүй бол нээгдээгүй", opened, None)
 
 print()
 print("FAILED" if fails else "ALL PASS")
