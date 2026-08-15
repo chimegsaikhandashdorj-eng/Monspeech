@@ -45,6 +45,76 @@ NOISE_CEILING = 2500.0
 RECALIBRATE_AFTER = 1.4
 RECALIBRATE_RATIO = 0.35
 
+
+# ----------------------------------------------------------------------
+# Төхөөрөмж сонгох
+# ----------------------------------------------------------------------
+def _input_channels(pa, index: int) -> int:
+    """Тухайн дугаарын төхөөрөмж хэдэн сувгаар СОНСОЖ чадахыг буцаана."""
+    try:
+        info = pa.get_device_info_by_index(index)
+    except Exception:  # noqa: BLE001 - дугаар хүрээнээс гарсан бол PyAudio шиднэ
+        return 0
+    try:
+        return int(info.get("maxInputChannels", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _device_name(pa, index: int) -> str:
+    try:
+        return str(pa.get_device_info_by_index(index).get("name", ""))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def resolve_input_device(pa, index: int | None, name: str = "") -> int | None:
+    """Хадгалсан дугаарыг ОДООГИЙН төхөөрөмжийн жагсаалттай тааруулна.
+
+    PyAudio-ийн дугаар нь тогтвортой биш: чихэвч салгаж холбоход жагсаалт
+    шинэчлэгдэж, өчигдрийн «1» өнөөдөр өөр төхөөрөмж — эсвэл огт сонсдоггүй
+    чанга яригч — болно. Тэр дугаараар нээхэд PortAudio нь «Invalid number of
+    channels» (-9998) гэж шиднэ: сонсох суваг нь тэг учраас. Хэрэглэгчийн хувьд
+    энэ нь «микрофон гэнэт ажиллахаа больсон» гэсэн үг.
+
+    Иймд нэрээр нь дахин олно, олдохгүй бол системийн үндсэн микрофон руу
+    (`None`) буцна — ажиллахгүй байхаас өөр микрофоноор ажилласан нь дээр.
+    """
+    if index is None or index < 0:
+        return None
+    if _input_channels(pa, index) >= CHANNELS and (
+        not name or _device_name(pa, index) == name
+    ):
+        return index
+
+    if name:
+        try:
+            count = pa.get_device_count()
+        except Exception:  # noqa: BLE001
+            count = 0
+        for i in range(count):
+            if _input_channels(pa, i) >= CHANNELS and _device_name(pa, i) == name:
+                return i
+    return None
+
+
+def input_device_name(index: int) -> str:
+    """Дугаараар нь төхөөрөмжийн нэрийг олно (тохиргоонд хадгалахад)."""
+    if index is None or index < 0:
+        return ""
+    try:
+        pa = pyaudio.PyAudio()
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        return _device_name(pa, index)
+    finally:
+        try:
+            pa.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 # Дуу цэгцлэх
 TRIM_PADDING = 0.12  # эхэнд үлдээх зай
 TRIM_TAIL_PADDING = 0.30  # төгсгөлд үлдээх зай (сүүлчийн үгийг хамгаална)
@@ -316,6 +386,7 @@ class Recorder:
         on_level=None,
         on_error=None,
         device_index: int | None = None,
+        device_name: str = "",
         max_seconds: float = 300.0,
         silence_hold: float = SILENCE_HOLD,
         keep_open_seconds: float = 45.0,
@@ -324,6 +395,9 @@ class Recorder:
         self.on_level = on_level
         self.on_error = on_error
         self.device_index = device_index
+        self.device_name = device_name
+        # Хамгийн сүүлд ҮНЭХЭЭР нээгдсэн дугаар (лог, оношилгоонд)
+        self.active_index: int | None = device_index
         self.max_seconds = max_seconds
         self.keep_open_seconds = keep_open_seconds
         self._pa: pyaudio.PyAudio | None = None
@@ -362,22 +436,52 @@ class Recorder:
             return "Сонгосон микрофон боломжгүй байна — Тохиргооноос өөрийг сонгоно уу."
         if "access" in text or "denied" in text:
             return "Микрофон ашиглах зөвшөөрөл алга — Windows-ийн Нууцлалын тохиргоог шалгана уу."
+        # -9998: сонгосон төхөөрөмж нь сонсдоггүй (чихэвч салсан, дугаар хуучирсан)
+        if "number of channels" in text:
+            return "Микрофон олдсонгүй — чихэвч/микрофоноо холбоод дахин оролдоно уу."
         return f"Микрофон нээгдсэнгүй: {exc}"
+
+    def _open(self, index: int | None):
+        return self._pa.open(
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RATE,
+            input=True,
+            frames_per_buffer=CHUNK,
+            input_device_index=index,
+        )
 
     def _open_stream(self) -> str | None:
         try:
             self._pa = pyaudio.PyAudio()
-            self._stream = self._pa.open(
-                format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                input=True,
-                frames_per_buffer=CHUNK,
-                input_device_index=self.device_index,
-            )
         except Exception as exc:  # noqa: BLE001 - PyAudio янз бүрийн алдаа шиднэ
             self._cleanup()
             return self._friendly_error(exc)
+
+        index = resolve_input_device(self._pa, self.device_index, self.device_name)
+        if index != self.device_index:
+            log.warning(
+                "сонгосон микрофон (%s «%s») олдсонгүй — %s руу шилжлээ",
+                self.device_index,
+                self.device_name,
+                "системийн үндсэн" if index is None else index,
+            )
+        try:
+            self._stream = self._open(index)
+        except Exception as exc:  # noqa: BLE001
+            if index is None:
+                self._cleanup()
+                return self._friendly_error(exc)
+            # Жагсаалт зөв мэдээлсэн ч нээлт бүтсэнгүй: системийн үндсэнээр
+            # сүүлчийн оролдлого хийнэ — огт бичихгүй байхаас арай дээр.
+            log.warning("микрофон %s нээгдсэнгүй (%s) — үндсэнээр оролдож байна", index, exc)
+            try:
+                self._stream = self._open(None)
+            except Exception:  # noqa: BLE001
+                self._cleanup()
+                return self._friendly_error(exc)
+            index = None
+        self.active_index = index
         return None
 
     def start(self) -> str | None:
@@ -397,7 +501,7 @@ class Recorder:
             warm = self.stream_open and not self._exiting
             self._capturing.set()
             if warm:
-                log.info("бичлэг эхэллээ (төхөөрөмж=%s, бэлэн=True)", self.device_index)
+                log.info("бичлэг эхэллээ (төхөөрөмж=%s, бэлэн=True)", self.active_index)
                 return None
             self._exiting = False
 
@@ -412,7 +516,7 @@ class Recorder:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        log.info("бичлэг эхэллээ (төхөөрөмж=%s, бэлэн=False)", self.device_index)
+        log.info("бичлэг эхэллээ (төхөөрөмж=%s, бэлэн=False)", self.active_index)
         return None
 
     def stop(self) -> None:

@@ -19,6 +19,7 @@ from monspeech.audio import (
     normalize,
     prepare_segment,
     remove_dc,
+    resolve_input_device,
     rms,
     trim_silence,
 )
@@ -201,6 +202,38 @@ check("яриаг үлдээнэ", len(trimmed) >= RATE // 2, True)
 prepared = prepare_segment(padded.tobytes(), RATE)
 check("бүрэн боловсруулалт богиносгоно", 0 < len(prepared) < len(padded) * 2, True)
 check("хоосон оролт", prepare_segment(b"", RATE), b"")
+
+# --- төхөөрөмж сонгох ---
+class FakePyAudio:
+    """PyAudio-ийн зөвхөн хэрэгтэй хэсгийг дуурайна (жинхэнэ микрофон хэрэггүй)."""
+
+    def __init__(self, devices):
+        self.devices = devices  # [(нэр, сонсох суваг), ...]
+
+    def get_device_count(self):
+        return len(self.devices)
+
+    def get_device_info_by_index(self, index):
+        if index < 0 or index >= len(self.devices):
+            raise OSError("invalid device index")
+        name, channels = self.devices[index]
+        return {"name": name, "maxInputChannels": channels}
+
+
+headset = FakePyAudio([("Sound Mapper", 2), ("Headset", 1), ("Speakers", 0)])
+# Чихэвч салахад MME-ийн «Sound Mapper» сонсох суваггүй болдог
+unplugged = FakePyAudio([("Sound Mapper", 0), ("Speakers", 0)])
+# Дахин холбоход дугаар нь шилжсэн байна
+moved = FakePyAudio([("Sound Mapper", 2), ("Webcam", 1), ("Headset", 1)])
+
+check("үндсэнийг хөндөхгүй", resolve_input_device(headset, -1, ""), None)
+check("None хэвээр", resolve_input_device(headset, None, ""), None)
+check("зөв дугаарыг хэвээр", resolve_input_device(headset, 1, "Headset"), 1)
+check("нэргүй хуучин тохиргоо", resolve_input_device(headset, 1, ""), 1)
+check("шилжсэн дугаарыг нэрээр олно", resolve_input_device(moved, 1, "Headset"), 2)
+check("сонсдоггүй төхөөрөмж → үндсэн", resolve_input_device(headset, 2, "Speakers"), None)
+check("салсан төхөөрөмж → үндсэн", resolve_input_device(unplugged, 1, "Headset"), None)
+check("хүрээнээс гарсан дугаар → үндсэн", resolve_input_device(headset, 9, ""), None)
 
 print()
 print("FAILED" if fails else "ALL PASS")

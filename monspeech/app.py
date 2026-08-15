@@ -23,7 +23,7 @@ import webbrowser
 import pyperclip
 
 from . import __version__, autostart, recognizer, update, winfocus
-from .audio import MIN_THRESHOLD, Recorder
+from .audio import MIN_THRESHOLD, Recorder, input_device_name
 from .config import Config
 from .history import InsertionHistory
 from .hotkeys import HotkeyManager, parse_combo, pretty
@@ -84,6 +84,7 @@ class MonspeechApp:
             on_level=self._on_level,
             on_error=self._on_audio_error,
             device_index=self._device_index(),
+            device_name=str(self.cfg["mic_name"]),
             max_seconds=float(self.cfg["max_recording_seconds"]),
             silence_hold=float(self.cfg["silence_hold"]),
             keep_open_seconds=float(self.cfg["mic_keep_open_seconds"]),
@@ -339,7 +340,11 @@ class MonspeechApp:
             + (" (багцалсан)" if getattr(sys, "frozen", False) else ""),
             f"Танигч: {provider}" + (" (өөрийн хаягтай)" if self.cfg["stt_url"] else ""),
             f"Хэл: {self.cfg['lang']} / {self.cfg['lang_alt']}",
-            f"Микрофон: {self.cfg['mic_index']}",
+            # Сонгосон нь ба ҮНЭХЭЭР нээгдсэн нь: хоёр нь зөрсөн бол
+            # төхөөрөмжийн дугаар шилжсэн гэсэн үг — оношилгооны гол мөр.
+            f"Микрофон: {self.cfg['mic_index']} "
+            f"{self.cfg['mic_name'] or '(системийн үндсэн)'} "
+            f"→ нээгдсэн: {self.recorder.active_index}",
             f"Толь: {len(self.cfg['replacements'])} үг, {len(self.cfg['snippets'])} товчлол",
             f"Лог: {LOG_PATH}",
         ]
@@ -413,8 +418,13 @@ class MonspeechApp:
         self.ui.set_detail("Сэдэв хадгалагдлаа — дахин эхлүүлэхэд идэвхжинэ.")
 
     def on_mic_changed(self, index: int) -> None:
+        # Дугаарын хажуугаар нэрийг нь хадгална: чихэвч салгаж холбоход дугаар
+        # шилждэг тул дараа нь нэрээр нь дахин олно (audio.resolve_input_device).
+        name = input_device_name(index)
         self.cfg["mic_index"] = index
+        self.cfg["mic_name"] = name
         self.recorder.device_index = None if index < 0 else index
+        self.recorder.device_name = name
         self.recorder.close()  # шинэ төхөөрөмжөөр дахин нээгдэнэ
         self.cfg.save()
         self.ui.set_detail("Микрофон солигдлоо.")
