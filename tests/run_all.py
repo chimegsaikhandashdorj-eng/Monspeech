@@ -9,11 +9,20 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+# Windows-ийн консол анхнаасаа cp1252 байдаг тул кирилл шошго хэвлэхэд
+# `UnicodeEncodeError` шидээд тест бүхэлдээ уначихдаг байв — бодит алдааг
+# нуусан хуурамч уналт. Өөрийн гаралт ба хүүхэд процессуудынхыг хоёуланг нь
+# UTF-8 болгоно.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 
 
 def main() -> int:
@@ -26,6 +35,7 @@ def main() -> int:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=CHILD_ENV,
         )
         status = "PASS" if result.returncode == 0 else "FAIL"
         print(f"{status}  {path.name}")

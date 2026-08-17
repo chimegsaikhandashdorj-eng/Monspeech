@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech import pipeline
 from monspeech.audio import RATE
@@ -94,6 +96,7 @@ BASE_CFG = {
     "min_confidence": 0.45,
     "restore_clipboard": True,
     "clean_speech": True,
+    "voice_numbers": True,
     "detect_language": False,  # тусад нь асаагаад шалгана
     "lang_alt": "en-US",
 }
@@ -200,6 +203,26 @@ worker, injector = build(
 )
 worker._handle(SPEECH, "mn-MN")
 check("унтраалттай бол хэвээр", injector.calls[0][0], "За ааа маргааш уулзъя ")
+
+# --- Цонх бүрийн шийдвэр тохиргооноос дээгүүр ---
+# Товч дарсан агшинд «энэ цонхонд цэвэрлэхгүй» гэж шийдсэн бол таних ажил
+# дуусах үед фокус өөр цонх руу шилжсэн ч тэр шийдвэр хэвээр үйлчилнэ.
+worker, injector = build([(["за ааа маргааш уулзъя"], 0.9)])
+worker._handle(SPEECH, "mn-MN", clean=False)
+check("цонхны шийдвэр дийлнэ", injector.calls[0][0], "За ааа маргааш уулзъя ")
+
+worker, injector = build(
+    [(["за ааа маргааш уулзъя"], 0.9)], cfg={**BASE_CFG, "clean_speech": False}
+)
+worker._handle(SPEECH, "mn-MN", clean=True)
+check("эсрэгээрээ ч мөн адил", injector.calls[0][0], "Маргааш уулзъя ")
+
+# Дараалалд гурав дахь утга байхгүй бол ерөнхий тохиргоо руу буцна
+worker, injector = build([(["за ааа маргааш уулзъя"], 0.9)])
+worker.segments.put((SPEECH, "mn-MN"))
+worker.segments.put(None)
+worker._loop()
+check("хуучин хэлбэрийн сегмент ажиллана", injector.calls[0][0], "Маргааш уулзъя ")
 
 # --- Цэвэрлэгээ дуут командыг хөндөхгүй ---
 worker, injector = build([(["ааа буцаа"], 0.9)])

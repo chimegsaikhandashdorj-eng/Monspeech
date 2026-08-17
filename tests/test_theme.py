@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech import theme
 

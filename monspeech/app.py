@@ -63,6 +63,7 @@ class MonspeechApp:
         self._level = 0.0
         self._pending = 0
         self._active_lang = self.cfg["lang"]
+        self._active_clean = bool(self.cfg["clean_speech"])
         self._last_prewarm = 0.0
 
         self.transcripts = TranscriptStore()
@@ -73,6 +74,7 @@ class MonspeechApp:
             voice_punctuation=self.cfg["voice_punctuation"],
             replacements=self.cfg["replacements"],
             snippets=self.cfg["snippets"],
+            names=self.cfg["names"],
         )
         # Өмнөх ажиллагааны түүхээр үрээнэ — эс бөгөөс хувилбар сонгох жин
         # апп нээх бүрд тэгээс эхэлнэ.
@@ -190,7 +192,9 @@ class MonspeechApp:
     # Дуу таних дамжлага
     # ------------------------------------------------------------------
     def _on_segment(self, pcm: bytes, final: bool) -> None:
-        self.segments.put((pcm, self._active_lang))
+        # Хэл ба цэвэрлэгээний шийдвэрийг сегменттэй хамт явуулна: таних ажил
+        # дуусах үед фокус өөр цонх дээр байвал буруу цонхны дүрэм үйлчилнэ.
+        self.segments.put((pcm, self._active_lang, self._active_clean))
         self.events.put(("pending", +1))
 
     def _on_level(self, level: float) -> None:
@@ -239,24 +243,43 @@ class MonspeechApp:
         self.start(lang) if pressed else self.stop()
 
     def _drain_events(self) -> None:
+        """Дарааллыг цэвэрлээд өөрийгөө дахин товлоно.
+
+        Дахин товлолт нь ЗААВАЛ хийгдэнэ (`finally`). Энэ дуудлага хагас
+        замдаа алдаагаар таслагдвал Tk нь алдааг логлоод залгина — апп амьд
+        харагдсаар байгаад эвент боловсруулахаа БҮРМӨСӨН болино: таньсан текст
+        гарахгүй, төлөв шинэчлэгдэхгүй, статистик хадгалагдахгүй. Нэг виджетийн
+        алдаа аппыг бүхэлд нь ингэж унтраах ёсгүй тул хариу үйлдэл бүрийг
+        тусад нь ч хамгаална.
+        """
         handlers = self._event_handlers
+        quitting = False
         try:
             while True:
-                kind, payload = self.events.get_nowait()
+                try:
+                    kind, payload = self.events.get_nowait()
+                except queue.Empty:
+                    break
                 if kind == "quit":
+                    quitting = True  # цонх устаж байгаа тул дахин товлохгүй
                     self.quit()
                     return
                 handler = handlers.get(kind)
                 if handler is None:
                     log.warning("танихгүй эвент: %s", kind)
                     continue
-                handler(payload)
-        except queue.Empty:
-            pass
-        self.ui.set_level(self._level, self.listening)
-        self._keepalive()
-        self.stats.save()
-        self.root.after(50, self._drain_events)
+                try:
+                    handler(payload)
+                except Exception:  # noqa: BLE001 - нэг эвент бусдыг зогсоохгүй
+                    log.exception("«%s» эвент бүтэлгүйтлээ", kind)
+            self.ui.set_level(self._level, self.listening)
+            self._keepalive()
+            self.stats.save()
+        except Exception:  # noqa: BLE001
+            log.exception("эвент дамжуулагчид алдаа гарлаа")
+        finally:
+            if not quitting:
+                self.root.after(50, self._drain_events)
 
     def _after_pending_change(self) -> None:
         if not self.listening and not self._pending:
@@ -502,19 +525,39 @@ class MonspeechApp:
             return str(self.cfg["lang"])
         return str(self.cfg["lang_apps"].get(marker) or self.cfg["lang"])
 
-    def remember_type_mode_app(self) -> str:
-        """Одоогийн цонхыг "шууд бичих" жагсаалтад нэмнэ."""
+    def _window_clean(self) -> bool:
+        """Энэ цонхонд ярианы чигчлүүрийг цэвэрлэх үү.
+
+        Ерөнхий тохиргоо асаалттай ч зарим цонхонд ҮГЧЛЭН бичих хэрэгтэй
+        байдаг (эш татах, ярианы тэмдэглэл) — тэднийг жагсаалтаар хасна.
+        Хэлний адилаар шийдвэрийг товч дарсан агшинд гаргана: таних ажил
+        дуусах үед фокус аль хэдийн өөр цонх дээр байж болно.
+        """
+        if not self.cfg["clean_speech"]:
+            return False
+        return self._match_window(self.cfg["no_clean_apps"]) is None
+
+    def _remember_window_in(self, key: str, label: str) -> str:
+        """Одоогийн цонхны нэрийг заасан жагсаалтад нэмнэ."""
         title = self.target.title()
         if not title:
             return "Цонх тодорхойгүй байна."
         marker = title.split(" - ")[-1].strip()[:40] or title[:40]
-        apps = list(self.cfg["type_mode_apps"])
+        apps = list(self.cfg[key])
         if marker.lower() in [a.lower() for a in apps]:
             return f"«{marker}» аль хэдийн жагсаалтад байна."
         apps.append(marker)
-        self.cfg["type_mode_apps"] = apps
+        self.cfg[key] = apps
         self.cfg.save()
-        return f"«{marker}» цонхонд одооноос шууд бичнэ."
+        return f"«{marker}» цонхонд одооноос {label}."
+
+    def remember_type_mode_app(self) -> str:
+        """Одоогийн цонхыг «шууд бичих» жагсаалтад нэмнэ."""
+        return self._remember_window_in("type_mode_apps", "шууд бичнэ")
+
+    def remember_no_clean_app(self) -> str:
+        """Одоогийн цонхыг «цэвэрлэхгүй» жагсаалтад нэмнэ."""
+        return self._remember_window_in("no_clean_apps", "үгчлэн бичнэ")
 
     def on_snippets_changed(self, raw: str) -> int:
         mapping = parse_replacements(raw)
@@ -522,6 +565,14 @@ class MonspeechApp:
         self.formatter.set_snippets(mapping)
         self.cfg.save()
         self.ui.set_detail(f"{len(mapping)} товчлол хадгалагдлаа.")
+        return len(mapping)
+
+    def on_names_changed(self, raw: str) -> int:
+        mapping = parse_replacements(raw)
+        self.cfg["names"] = mapping
+        self.formatter.set_names(mapping)
+        self.cfg.save()
+        self.ui.set_detail(f"{len(mapping)} нэр хадгалагдлаа.")
         return len(mapping)
 
     def on_lang_apps_changed(self, raw: str) -> int:
@@ -675,6 +726,7 @@ class MonspeechApp:
         # Хоёрдогч товчлуураар шууд заасан хэл нь аппын профайлаас дээгүүр —
         # хэрэглэгч зориуд дарсан бол түүнийг нь дийлэхгүй.
         self._active_lang = lang or self._window_lang()
+        self._active_clean = self._window_clean()
         self.recorder.max_seconds = float(self.cfg["max_recording_seconds"])
         self.recorder.segmenter.silence_hold = float(self.cfg["silence_hold"])
         error = self.recorder.start()

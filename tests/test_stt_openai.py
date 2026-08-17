@@ -11,6 +11,8 @@ import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 import monspeech.recognizer as recognizer_module
 from monspeech.recognizer import RecognitionError

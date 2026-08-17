@@ -65,8 +65,10 @@ class RecognitionWorker:
             item = self.segments.get()
             if item is None:
                 return
-            pcm, lang = item
-            self._handle(pcm, lang)
+            # Цэвэрлэгээний шийдвэр нь заавал биш: дуудагч өгөөгүй бол
+            # ерөнхий тохиргоог хэрэглэнэ.
+            pcm, lang, *rest = item
+            self._handle(pcm, lang, rest[0] if rest else None)
 
     def _retry_other_language(
         self, pcm: bytes, lang: str, alternatives: list[str], confidence: float
@@ -108,7 +110,9 @@ class RecognitionWorker:
             return retry_alternatives, retry_confidence, other
         return alternatives, confidence, lang
 
-    def _handle(self, pcm: bytes, lang: str) -> None:
+    def _handle(self, pcm: bytes, lang: str, clean: bool | None = None) -> None:
+        if clean is None:
+            clean = bool(self.cfg["clean_speech"])
         started = time.monotonic()
         spoken_seconds = len(pcm) / (RATE * BYTES_PER_SAMPLE)
         try:
@@ -150,7 +154,7 @@ class RecognitionWorker:
             log.info("итгэлцэл бага тул алгаслаа (%.2f)", confidence)
             self.events.put(("empty", "low_confidence"))
             return
-        if self.cfg["clean_speech"]:
+        if clean:
             # Дуут командыг («буцаа») цэвэрлэгээ хөндөхгүй: тэдгээр нь
             # чигчлүүрийн жагсаалтад байхгүй тул бүтнээрээ үлдэнэ.
             cleaned_raw = textproc.clean_speech(raw)
@@ -158,6 +162,10 @@ class RecognitionWorker:
                 self.events.put(("empty", "filler"))
                 return
             raw = cleaned_raw
+        if self.cfg["voice_numbers"]:
+            # Цэвэрлэгээний ДАРАА: чигчлүүр хасагдсанаар тооны үгс зэрэгцэж,
+            # «хорин ааа гурван» гэх мэт нь ч нэг тоо болж уншигдана.
+            raw = textproc.spell_numbers(raw)
 
         if textproc.match_action(raw) == "undo":
             self.events.put(("undo", None))

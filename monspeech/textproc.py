@@ -258,6 +258,131 @@ def looks_foreign(text: str) -> bool:
     return latin > cyrillic
 
 
+# ----------------------------------------------------------------------
+# Тооны үгийг цифр болгох
+#
+# Google `mn-MN` нь тоог бараг үргэлж ҮГЭЭР буцаадаг: «хорин гурван цагт»,
+# «хоёр мянга хорин зургаан он». Бичихэд эдгээр нь цифр байх ёстой. Монгол
+# тоо нэрийн бүтэц бол энгийн нэмэх/үржих дүрэм тул LLM хэрэггүй — 0 мс,
+# офлайн, `clean_speech`-тэй ижил гүн ухаан.
+# ----------------------------------------------------------------------
+
+#: Үндсэн ба тодотгол хэлбэр хоёуланг нь: «гурав», «гурван» хоёулаа 3.
+NUMBER_WORDS: dict[str, int] = {
+    "нэг": 1, "нэгэн": 1,
+    "хоёр": 2,
+    "гурав": 3, "гурван": 3,
+    "дөрөв": 4, "дөрвөн": 4,
+    "тав": 5, "таван": 5,
+    "зургаа": 6, "зургаан": 6,
+    "долоо": 7, "долоон": 7,
+    "найм": 8, "найман": 8,
+    "ес": 9, "есөн": 9,
+    "арав": 10, "арван": 10,
+    "хорь": 20, "хорин": 20,
+    "гуч": 30, "гучин": 30,
+    "дөч": 40, "дөчин": 40,
+    "тавь": 50, "тавин": 50,
+    "жар": 60, "жаран": 60,
+    "дал": 70, "далан": 70,
+    "ная": 80, "наян": 80,
+    "ер": 90, "ерэн": 90,
+    "зуу": 100, "зуун": 100,
+    "мянга": 1000, "мянган": 1000,
+    "сая": 1_000_000,
+    "тэрбум": 1_000_000_000,
+}
+
+#: ГАНЦААРАА зогсоход тооноос өөр, өдөр тутмын утга давамгайлдаг үгс.
+#: Хоёр ба түүнээс дээш тооны үг дараалбал тоо гэдэг нь эргэлзээгүй тул
+#: тэнд хөрвүүлнэ («хорин нэг» → 21), ганцаараа бол хэвээр үлдээнэ:
+#:
+#: * «нэг», «нэгэн» — тодорхойгүй өгүүлэгч («нэг л удаа», «нэг тийм»)
+#: * «ер» — «ер нь»
+#: * «сая» — «сая хэлсэн» (дөнгөж сая)
+#: * «тав» — «тав тухтай»
+#: * «зуун» — «хорин нэгдүгээр зуун» (зуун жил)
+#: * «дал», «ная» — тоо болж ганцаараа бараг хэрэглэгддэггүй
+AMBIGUOUS_ALONE = frozenset({"нэг", "нэгэн", "ер", "сая", "тав", "зуун", "дал", "ная"})
+
+#: Дэс тоон дагавар («нэгдүгээр», «хоёрдугаар»). Тооны цуваа ийм үгээр
+#: үргэлжилж байвал энэ нь нэг бүхэл дэс тоо: «хорин нэгдүгээр зуун» гэдгийн
+#: «хорин» нь 20 биш, 21-ийн эхний хагас. Бүтнээр нь хөрвүүлж чадахгүй тул
+#: хагасыг нь эвдэхээс татгалзаж, хэвээр үлдээнэ.
+_ORDINAL_TAIL = re.compile(r"(?:дугаар|дүгээр)$")
+
+
+def _compose(values: list[int]) -> int | None:
+    """Тооны үгсийн утгыг нэг тоо болгоно. Бүтэц нь тоо биш бол `None`.
+
+    Зуу, мянга, сая нь ҮРЖИГДЭХҮҮН, бусад нь нэмэгдэхүүн:
+    «мянга есөн зуун ерэн зургаа» → 1000 + 9×100 + 90 + 6 = 1996.
+
+    Бүтцийг ЗААВАЛ шалгана: жинхэнэ тоонд нэмэгдэхүүн бүр өмнөхөөсөө ЖИЖИГ
+    байдаг. «нэг хоёр» гэдэг нь 3 биш — тоолж байгаа хүн, эсвэл дугаар
+    уншиж байгаа хүн. Шалгалтгүй бол ийм яриа бүхэлдээ гуйвна.
+    """
+    total = 0
+    current = 0
+    last_added: int | None = None
+    for value in values:
+        if value >= 1000:
+            total += max(current, 1) * value
+            current = 0
+            last_added = None
+        elif value == 100:
+            if current > 9:
+                return None  # «хорин зуун» гэж байхгүй
+            current = max(current, 1) * 100
+            last_added = 100
+        else:
+            if last_added is not None and value >= last_added:
+                return None
+            current += value
+            last_added = value
+    return total + current
+
+
+def spell_numbers(raw: str) -> str:
+    """«хорин гурван цагт» → «23 цагт».
+
+    ЭРГЭЛЗВЭЛ ХӨНДӨХГҮЙ: ганц үгээс тогтсон бөгөөд тэр нь `AMBIGUOUS_ALONE`-д
+    байвал хэвээр үлдээнэ. Тооны үгэнд наалдсан цэг таслалыг цифрт шилжүүлнэ.
+    Нөхцөл залгасан хэлбэр («гуравт», «хоёрын») толинд байхгүй тул хөндөгдөхгүй.
+    """
+    words = raw.split()
+    out: list[str] = []
+    index = 0
+    while index < len(words):
+        start = index
+        run: list[int] = []
+        while index < len(words):
+            value = NUMBER_WORDS.get(_core(words[index]))
+            if value is None:
+                break
+            run.append(value)
+            index += 1
+        if not run:
+            out.append(words[index])
+            index += 1
+            continue
+        if len(run) == 1 and _core(words[start]) in AMBIGUOUS_ALONE:
+            out.append(words[start])
+            continue
+        if index < len(words) and _ORDINAL_TAIL.search(_core(words[index])):
+            out.extend(words[start:index])  # дэс тооны хагасыг эвдэхгүй
+            continue
+        value = _compose(run)
+        if value is None:
+            out.extend(words[start:index])  # тооны бүтэц биш — хэвээр
+            continue
+        head, tail = words[start], words[index - 1]
+        prefix = head[: len(head) - len(head.lstrip(_STRIP))]
+        suffix = tail[len(tail.rstrip(_STRIP)) :]
+        out.append(f"{prefix}{value}{suffix}")
+    return " ".join(out)
+
+
 def clean_speech(raw: str) -> str:
     """Ярианы чигчлүүрийг хасаж, бичихэд тохирох хэлбэрт оруулна.
 
@@ -270,6 +395,59 @@ def clean_speech(raw: str) -> str:
         return ""
     words = _collapse_repeats(_apply_corrections(_drop_leading(_drop_noise(words))))
     return " ".join(words)
+
+
+# ----------------------------------------------------------------------
+# Хүний нэрийг ойролцоогоор таних
+#
+# Танигч нэрийг тогтмол нэг янзаар буруу сонсдоггүй: «Чимэгсайхан» нь нэг
+# удаа «чимэг сайхан», нөгөө удаа «чимээ сайхан», бас «чимэгсайхны» гэж
+# ирнэ. Толь нь ЯГ ТАГ таарсныг л сольдог тул хувилбар бүрд мөр нэмэх
+# шаардлагатай болдог — эцэс төгсгөлгүй. Иймд нэрсийг тусад нь, ойролцоо
+# зайгаар нь тааруулна.
+# ----------------------------------------------------------------------
+
+#: Ойролцоо тааруулгад оруулах хамгийн богино нэр. «Болд» гэх богино нэр нь
+#: өдөр тутмын үгээс ганц үсгээр зөрдөг («болно», «болж») тул түүнийг зөвхөн
+#: ЯГ ТАГ таарвал солино — эс бөгөөс хэвийн яриа нэр болж эхэлнэ.
+FUZZY_MIN_LENGTH = 6
+#: Нэрийн араас үлдэж болох нөхцөлийн дээд урт («-тай», «-ыгаа»).
+MAX_NAME_SUFFIX = 5
+#: Нэр хэдэн үг болж сонсогдож болох вэ («чимэг сайхан» = 2).
+MAX_NAME_WORDS = 2
+#: Хувилбар сонголтод нэр өгөх оноо — хэрэглэгч өөрөө бичсэн тул тольтой тэнцүү.
+NAME_SCORE = 3
+
+
+def _name_key(text: str) -> str:
+    """Нэрийг харьцуулах хэлбэрт: жижиг үсэг, тэмдэггүй, зайгүй."""
+    return "".join(w.strip(_STRIP).lower() for w in text.split() if w.strip(_STRIP))
+
+
+def _prefix_distance(pattern: str, text: str) -> tuple[int, int]:
+    """`pattern`-ийг `text`-ийн ЭХЛЭЛД тааруулах хамгийн бага засварын зай.
+
+    `(зай, таарсан урт)` буцаана — үлдсэн хэсэг нь нөхцөлийн дагавар болно.
+    Ердийн Левенштейн нь бүтэн үгтэй жишдэг тул «Чимэгсайхантай» гэсэн
+    нөхцөлтэй хэлбэрийг хол гэж үзээд алддаг. Энэ хувилбар нь дагаварыг
+    торгодоггүй: аль ч байрлалд төгсөж болно.
+    """
+    previous = list(range(len(text) + 1))
+    for i, pattern_char in enumerate(pattern, start=1):
+        current = [i]
+        for j, text_char in enumerate(text, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,  # текстийн үсгийг алгасах
+                    current[j - 1] + 1,  # нэрийн үсгийг алгасах
+                    previous[j - 1] + (pattern_char != text_char),
+                )
+            )
+        previous = current
+    # Хамгийн бага зай; тэнцвэл УРТ таарсныг сонгоно (дагавар нь богино байх
+    # тусам «нэр байх магадлал» өндөр).
+    best = min(range(len(previous)), key=lambda j: (previous[j], -j))
+    return previous[best], best
 
 
 class Formatter:
@@ -286,12 +464,14 @@ class Formatter:
         voice_punctuation: bool = True,
         replacements: dict[str, str] | None = None,
         snippets: dict[str, str] | None = None,
+        names: dict[str, str] | None = None,
     ) -> None:
         self.auto_space = auto_space
         self.auto_capitalize = auto_capitalize
         self.voice_punctuation = voice_punctuation
         self._set_replacements(replacements)
         self.set_snippets(snippets)
+        self.set_names(names)
         self._history: deque[str] = deque(maxlen=HISTORY_MEMORY)
         self.reset()
 
@@ -308,7 +488,7 @@ class Formatter:
         бүгд энд байна.
         """
         return choose_alternative(
-            alternatives, self.replacements, self.snippets, self._history
+            alternatives, self.replacements, self.snippets, self._history, self.names
         )
 
     def _set_replacements(self, replacements: dict[str, str] | None) -> None:
@@ -321,6 +501,61 @@ class Formatter:
         """Дуут товчлол: хэлсэн хэллэгийг урт бэлэн текстээр солино."""
         self.snippets = {k.strip().lower(): v for k, v in (snippets or {}).items()}
         self._max_snippet_words = max((len(key.split()) for key in self.snippets), default=1)
+
+    def set_names(self, names: dict[str, str] | None) -> None:
+        """Хүний нэрс: `{Зөв нэр: "сонсогддог хувилбарууд"}`.
+
+        Зөв нэр нь ойролцоо тааруулгын бай болно; хувилбарууд (таслалаар
+        тусгаарласан, заавал биш) нь ЯГ ТАГ таарах нэмэлт түлхүүрүүд —
+        ойролцоо тааруулга барьж чадахгүй хол зөрүүг хүн өөрөө зааж өгнө.
+        """
+        self.names = {k.strip(): v for k, v in (names or {}).items() if k.strip()}
+        self._exact_names: dict[str, str] = {}
+        self._fuzzy_names: list[tuple[str, str]] = []
+        for correct, aliases in self.names.items():
+            key = _name_key(correct)
+            if not key:
+                continue
+            self._exact_names[key] = correct
+            if len(key) >= FUZZY_MIN_LENGTH:
+                self._fuzzy_names.append((key, correct))
+            for alias in re.split(r"[,;]", aliases or ""):
+                alias_key = _name_key(alias)
+                if alias_key:
+                    self._exact_names[alias_key] = correct
+
+    def _match_name(self, words: list[str], index: int) -> tuple[str, int, str] | None:
+        """Нэрийг таана: `(зөв бичлэг, идсэн үгийн тоо, нөхцөлийн дагавар)`.
+
+        Урт цонхноос эхэлнэ: «чимэг сайхан» гэж хоёр үг болж сонсогдсоныг
+        нэг нэр болгож нийлүүлэхийн тулд.
+        """
+        limit = min(MAX_NAME_WORDS, len(words) - index)
+        for size in range(limit, 0, -1):
+            window = [w.strip(_STRIP).lower() for w in words[index : index + size]]
+            if not all(window):
+                continue
+            joined = "".join(window)
+            exact = self._exact_names.get(joined)
+            if exact:
+                return exact, size, ""
+            if len(joined) < FUZZY_MIN_LENGTH:
+                continue
+            for key, correct in self._fuzzy_names:
+                distance, matched = _prefix_distance(key, joined)
+                # Урт нэр илүү олон алдаа даана; богино нэр бараг даахгүй.
+                if distance > max(1, len(key) // 5):
+                    continue
+                suffix = joined[matched:]
+                if len(suffix) > MAX_NAME_SUFFIX:
+                    continue  # нэр нь урт үгийн дотор таарчээ — нэр биш
+                if size > 1 and suffix:
+                    # Олон үгийг нийлүүлж байгаа тул үлдэгдэл гарах ёсгүй:
+                    # «чимэгсайхан ирлээ» гэдгийн «ирлээ» нь нөхцөл биш,
+                    # дараагийн үг. Богино цонхоор дахин оролдоно.
+                    continue
+                return correct, size, suffix
+        return None
 
     def reset(self) -> None:
         """Шинэ өгүүлбэрийн эхнээс эхэлж байгаа мэт төлөвт оруулна."""
@@ -429,13 +664,22 @@ class Formatter:
                     self._sentence_start = True
                 continue
 
-            phrase = self._match_replacement(words, index)
-            if phrase:
-                word, size = phrase
+            # Нэр нь толиос ӨМНӨ: «чимэг сайхан» гэсэн хоёр үгийг нэг нэр
+            # болгож нийлүүлэх нь тус тусад нь үг солихоос дээгүүр.
+            named = self._match_name(words, index)
+            if named:
+                correct, size, ending = named
+                tail_word = words[index + size - 1]
                 index += size
+                word = correct + ending + tail_word[len(tail_word.rstrip(_STRIP)) :]
             else:
-                word = self._replace_word(words[index])
-                index += 1
+                phrase = self._match_replacement(words, index)
+                if phrase:
+                    word, size = phrase
+                    index += size
+                else:
+                    word = self._replace_word(words[index])
+                    index += 1
             if text and last() not in TIGHT_RIGHT:
                 text += " "
             if self.auto_capitalize and self._sentence_start:
@@ -487,6 +731,7 @@ def _vocabulary(
     replacements: dict[str, str],
     snippets: dict[str, str],
     history: Iterable[str] = (),
+    names: dict[str, str] | None = None,
 ) -> tuple[dict[str, int], int]:
     """Хэрэглэгчийн үгсийн сан → `{хэллэг: оноо}` ба хамгийн урт хэллэгийн үгийн тоо."""
     table: dict[str, int] = {}
@@ -503,6 +748,10 @@ def _vocabulary(
             add(word, HISTORY_SCORE)
     for phrase in snippets:
         add(phrase, SNIPPET_SCORE)
+    for correct, aliases in (names or {}).items():
+        add(correct, NAME_SCORE)
+        for alias in re.split(r"[,;]", aliases or ""):
+            add(alias, NAME_SCORE)
     for heard, correct in replacements.items():
         add(heard, HEARD_SCORE)
         add(correct, CORRECT_SCORE)
@@ -532,6 +781,7 @@ def choose_alternative(
     replacements: dict[str, str] | None = None,
     snippets: dict[str, str] | None = None,
     history: Iterable[str] = (),
+    names: dict[str, str] | None = None,
 ) -> str:
     """Таних хувилбаруудаас хэрэглэгчийн үгсийн санд хамгийн сайн нийцэхийг сонгоно.
 
@@ -551,7 +801,7 @@ def choose_alternative(
     best = alternatives[0]
     if len(alternatives) < 2:
         return best
-    table, longest = _vocabulary(replacements or {}, snippets or {}, history)
+    table, longest = _vocabulary(replacements or {}, snippets or {}, history, names)
     if not table:
         return best
     best_score = _vocabulary_score(best, table, longest)

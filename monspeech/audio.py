@@ -37,6 +37,11 @@ MIN_SPEECH = 0.22  # үүнээс богино дуутай хэсгийг ил�
 # илгээнэ. Эс бөгөөс "уу", "юм" зэрэг богино сүүлчийн үг чимээгүй алга болно.
 FINAL_MIN_SPEECH = 0.10
 MAX_SEGMENT = 45.0  # хэт урт бичлэгийг албаар тасална
+# Товч суллах агшинд микрофоны буферт унших гараагүй хэсэг үлддэг (`read()` нь
+# CHUNK бүрдэх хүртэл хүлээдэг тул үргэлж 1-2 хэсэг хоцордог). Тэр нь яг
+# хэлсэн зүйлийн сүүлчийн үе байдаг учир хаявал «…юм», «…уу» алга болно.
+# Тиймээс суллагдсаны дараа буферийг соруулж, дээр нь жаахан хүлээж авна.
+FINAL_DRAIN_SECONDS = 0.35
 NOISE_SAMPLE = 0.25  # эхний хэсгээр орчны чимээг хэмжинэ
 MIN_THRESHOLD = 320.0
 # Орчны чимээний хэмжилтээс гарах босгын дээд хязгаар. Хэрэглэгч товч дармагцаа
@@ -83,15 +88,44 @@ rms = _rms_audioop if audioop is not None else _rms_python
 # ----------------------------------------------------------------------
 # Дуу цэгцлэх (цэвэр функцууд — микрофон шаардахгүй)
 # ----------------------------------------------------------------------
-def remove_dc(samples: array.array) -> array.array:
-    """Тогтмол хазайлтыг арилгана."""
-    if not samples:
-        return samples
+SAMPLE_MAX = 32767
+SAMPLE_MIN = -32768
+
+
+def _from_bytes(raw: bytes) -> array.array:
+    out = array.array("h")
+    out.frombytes(raw)
+    return out
+
+
+def _remove_dc_python(samples: array.array) -> array.array:
     mean = sum(samples) / len(samples)
     if abs(mean) < 1:
         return samples
     shift = int(round(mean))
-    return array.array("h", (max(-32768, min(32767, value - shift)) for value in samples))
+    return array.array(
+        "h", (max(SAMPLE_MIN, min(SAMPLE_MAX, value - shift)) for value in samples)
+    )
+
+
+def _remove_dc_audioop(samples: array.array) -> array.array:
+    raw = samples.tobytes()
+    shift = audioop.avg(raw, BYTES_PER_SAMPLE)
+    if abs(shift) < 1:
+        return samples
+    # `audioop.bias` нь халихдаа КЛИП хийхгүй, тойрч эргэдэг: +32767 дээр
+    # нэмэхэд -32768 болно — сонсогдохоор шаржигнуур үүснэ. Тиймээс эргэлт
+    # үүсэх боломжгүй нь батлагдсан үед л ашиглана.
+    if audioop.max(raw, BYTES_PER_SAMPLE) + abs(shift) <= SAMPLE_MAX:
+        return _from_bytes(audioop.bias(raw, BYTES_PER_SAMPLE, -shift))
+    return _remove_dc_python(samples)
+
+
+def remove_dc(samples: array.array) -> array.array:
+    """Тогтмол хазайлтыг арилгана."""
+    if not samples:
+        return samples
+    return _remove_dc(samples)
 
 
 def trim_silence(samples: array.array, rate: int, threshold: float) -> array.array:
@@ -129,19 +163,46 @@ def trim_silence(samples: array.array, rate: int, threshold: float) -> array.arr
     return samples[start:end]
 
 
+def _gain_for(peak: int) -> float:
+    """Дээд цэгийг зорилтот түвшинд хүргэх өсгөлт (1.0 бол хөндөх шаардлагагүй)."""
+    if peak == 0:
+        return 1.0
+    gain = min(MAX_GAIN, TARGET_PEAK / peak)
+    return gain if gain > 1.05 else 1.0  # аль хэдийн хангалттай чанга
+
+
+def _normalize_python(samples: array.array) -> array.array:
+    gain = _gain_for(max(abs(value) for value in samples))
+    if gain == 1.0:
+        return samples
+    return array.array(
+        "h", (max(SAMPLE_MIN, min(SAMPLE_MAX, int(value * gain))) for value in samples)
+    )
+
+
+def _normalize_audioop(samples: array.array) -> array.array:
+    raw = samples.tobytes()
+    gain = _gain_for(audioop.max(raw, BYTES_PER_SAMPLE))
+    if gain == 1.0:
+        return samples
+    # `mul` нь `bias`-аас ялгаатай нь халилтыг клип хийдэг. Гэхдээ өсгөлтийг
+    # дээд цэгээр нь тооцсон тул халилт үүсэхгүй ч байх ёстой.
+    return _from_bytes(audioop.mul(raw, BYTES_PER_SAMPLE, gain))
+
+
 def normalize(samples: array.array) -> array.array:
     """Хамгийн чанга цэгийг зорилтот түвшинд хүргэж өсгөнө."""
     if not samples:
         return samples
-    peak = max(abs(value) for value in samples)
-    if peak == 0:
-        return samples
-    gain = min(MAX_GAIN, TARGET_PEAK / peak)
-    if gain <= 1.05:  # аль хэдийн хангалттай чанга
-        return samples
-    return array.array(
-        "h", (max(-32768, min(32767, int(value * gain))) for value in samples)
-    )
+    return _normalize(samples)
+
+
+# `rms`-ийн адил: C хувилбар байвал түүнийг, эс бөгөөс цэвэр Python-ыг.
+# Хэмжсэн ялгаа нь жижиг биш — 10 секундын дуунд `normalize` ганцаараа
+# ~90 мс иддэг байсан бол C дээр нэг мс хүрэхгүй. Энэ хугацаа бүхэлдээ
+# хэрэглэгчийн товч суллахаас текст гарах хүртэлх хүлээлт дээр нэмэгддэг.
+_remove_dc = _remove_dc_audioop if audioop is not None else _remove_dc_python
+_normalize = _normalize_audioop if audioop is not None else _normalize_python
 
 
 def prepare_segment(pcm: bytes, rate: int = RATE, threshold: float = MIN_THRESHOLD) -> bytes:
@@ -346,6 +407,9 @@ class Recorder:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._capturing = threading.Event()
+        # «Товч суллагдсан, үлдсэн дууг цуглуулж дуусга» гэсэн дохио. Унших
+        # thread үүнийг хараад өөрөө төгсгөнө — `stop()` хүлээхгүй.
+        self._finishing = threading.Event()
         self._seg_lock = threading.Lock()
         # Унших thread гарах шийдвэр ба `start()`-ын "дулаан уу" шалгалтыг
         # хооронд нь оруулахгүй байлгах түгжээ
@@ -406,12 +470,21 @@ class Recorder:
         index = mics.resolve(self._pa, self.mic)
         self.active_index = index
         if not self.mic.is_default and index != self.mic.index:
-            log.warning(
-                "сонгосон микрофон («%s», №%s) олдсонгүй — %s руу шилжлээ",
-                self.mic.name,
-                self.mic.index,
-                "системийн үндсэн" if index is None else index,
-            )
+            if index is None:
+                log.warning(
+                    "сонгосон микрофон («%s», №%s) олдсонгүй — системийн үндсэн рүү",
+                    self.mic.name,
+                    self.mic.index,
+                )
+            else:
+                # Олдсон. Зөвхөн дугаар нь шилжсэн — «олдсонгүй» гэж бичвэл
+                # дараагийн удаа логыг уншиж буй хүнийг төөрөгдүүлнэ.
+                log.info(
+                    "«%s» микрофон №%s → №%s болж шилжжээ",
+                    self.mic.name,
+                    self.mic.index,
+                    index,
+                )
         try:
             self._stream = self._open_device(index)
         except Exception as exc:  # noqa: BLE001
@@ -446,6 +519,9 @@ class Recorder:
         # мэт харагдаад дуу огт ирэхгүй" гэсэн байдал үүсэхгүй.
         with self._state_lock:
             warm = self.stream_open and not self._exiting
+            # Өмнөх бичлэгийн төгсгөл хараахан дуусаагүй байж болно. Дохиог
+            # цуцлавал тэр нь шинэ бичлэгийг таслахгүйгээр өнгөрнө.
+            self._finishing.clear()
             self._capturing.set()
             if warm:
                 log.info("бичлэг эхэллээ (төхөөрөмж=%s, бэлэн=True)", self.active_index)
@@ -467,16 +543,19 @@ class Recorder:
         return None
 
     def stop(self) -> None:
-        """Бичихээ болино. Үлдсэн хэсгийг сүүлчийн өгүүлбэр болгож илгээнэ."""
+        """Бичихээ болино. Үлдсэн хэсгийг сүүлчийн өгүүлбэр болгож илгээнэ.
+
+        Энэ дуудлага Tk-ийн үндсэн thread дээрээс ирдэг тул **хүлээхгүй**:
+        буферт хоцорсон дууг соруулах ажлыг унших thread-д даалгаад тэр дороо
+        буцна. Эс бөгөөс товч суллах бүрд цонх хэдэн зуун мс царцана.
+        """
         if not self._capturing.is_set():
             return
-        self._capturing.clear()
-        self._idle_since = time.monotonic()
-        with self._seg_lock:
-            final = self.segmenter.flush(final=True)
-        if final:
-            self.on_segment(final, True)
-        log.info("бичлэг зогслоо (%.1f сек)", time.monotonic() - self.started_at)
+        self._finishing.set()
+        if self.stream_open:
+            return  # унших thread буферээ соруулаад өөрөө төгсгөнө
+        # Унших thread амьд биш бол хүлээх хүн алга — энд дуусгана
+        self._finish_capture()
         if self.keep_open_seconds <= 0:
             self.close()
 
@@ -490,6 +569,7 @@ class Recorder:
         self._thread = None
         with self._state_lock:
             self._exiting = False
+            self._finishing.clear()
         # Thread хугацаандаа гараагүй бол өөрөө цэвэрлэж амжаагүй байж болно
         self._cleanup()
         log.info("микрофон суллагдлаа")
@@ -520,6 +600,61 @@ class Recorder:
                 log.info("сул зогсолтын үед микрофон салсан тул хаалаа")
             return None
 
+    def _consume(self, chunk: bytes) -> None:
+        """Нэг хэсгийг түвшин заалт ба сегментчлэлд дамжуулна."""
+        level = rms(chunk)
+        self.session_peak = max(self.session_peak, level)
+        if self.on_level:
+            self.on_level(level)
+        with self._seg_lock:
+            segment = self.segmenter.feed(chunk)
+        if segment:
+            self.on_segment(segment, False)
+
+    def _drain_buffer(self) -> None:
+        """Микрофоны буферт хоцорсон хэсгүүдийг сорж авна.
+
+        Эхлээд бэлэн байгаа бүхнийг, дараа нь нэг хэсгийг НЭМЖ хүлээж уншина:
+        төхөөрөмжийн саатлаас болж хамгийн сүүлчийн үе буферт хараахан
+        бичигдээгүй байж болно. Нэмэлт саатал нь ~64 мс — алдагдсан үгийг
+        буцааж авахын төлөө төлөх зохистой үнэ.
+        """
+        stream = self._stream
+        if stream is None:
+            return
+        deadline = time.monotonic() + FINAL_DRAIN_SECONDS
+        lingered = False
+        while time.monotonic() < deadline:
+            try:
+                if stream.get_read_available() < CHUNK:
+                    if lingered:
+                        return
+                    lingered = True  # нэг удаа хүлээж үзнэ
+                chunk = stream.read(CHUNK, exception_on_overflow=False)
+            except Exception as exc:  # noqa: BLE001
+                # Энд дахин нээх гэж оролдохгүй: төгсгөлийн хэдэн мс төдийд
+                # төхөөрөмж сэргэхгүй, харин хэрэглэгч хүлээнэ.
+                log.warning("сүүлчийн хэсгийг уншиж чадсангүй: %s", exc)
+                return
+            self._consume(chunk)
+
+    def _finish_capture(self) -> None:
+        """Буферээ соруулаад бичлэгийн төлөвийг хааж, сүүлчийн өгүүлбэрийг илгээнэ."""
+        self._drain_buffer()
+        with self._state_lock:
+            if not self._finishing.is_set():
+                # Энэ хооронд дахин бичиж эхэлсэн — шинэ бичлэгийг таслахгүй.
+                # Соруулсан хэсэг нь шинэ сегментийн эхэнд үлдэнэ.
+                return
+            self._finishing.clear()
+            self._capturing.clear()
+        self._idle_since = time.monotonic()
+        with self._seg_lock:
+            final = self.segmenter.flush(final=True)
+        if final:
+            self.on_segment(final, True)
+        log.info("бичлэг зогслоо (%.1f сек)", time.monotonic() - self.started_at)
+
     def _loop(self) -> None:
         try:
             while not self._stop.is_set():
@@ -542,20 +677,17 @@ class Recorder:
                         return
                     continue
 
-                level = rms(chunk)
-                self.session_peak = max(self.session_peak, level)
-                if self.on_level:
-                    self.on_level(level)
-                with self._seg_lock:
-                    segment = self.segmenter.feed(chunk)
-                if segment:
-                    self.on_segment(segment, False)
+                self._consume(chunk)
+                if self._finishing.is_set():
+                    # Товч суллагдсан. Буферт хоцорсон сүүлчийн үеийг соруулж
+                    # авах ажил ЭНД л хийгдэнэ — `stop()` хүлээхгүй буцсан.
+                    self._finish_capture()
+                    if self.keep_open_seconds <= 0:
+                        return  # `finally` дотор урсгал хаагдана
+                    continue
                 if time.monotonic() - self.started_at > self.max_seconds:
-                    self._capturing.clear()
-                    with self._seg_lock:
-                        final = self.segmenter.flush(final=True)
-                    if final:
-                        self.on_segment(final, True)
+                    self._finishing.set()
+                    self._finish_capture()
                     self._fail(
                         f"Бичлэг {int(self.max_seconds / 60)} минут үргэлжилсэн тул зогслоо."
                     )

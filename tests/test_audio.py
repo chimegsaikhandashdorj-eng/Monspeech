@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech import audio as audio_module, mics
 from monspeech.audio import (
@@ -193,6 +195,28 @@ check("хэт өсгөхгүй", max(louder) <= 32767, True)
 loud = array.array("h", [int(30000 * math.sin(2 * math.pi * i / 40)) for i in range(4000)])
 check("аль хэдийн чанга бол хөндөхгүй", normalize(loud) is loud, True)
 
+# --- C (audioop) ба цэвэр Python зам ЯГ ижил үр дүн өгөх ёстой ---
+# Хурдны төлөө C рүү шилжсэн ч Python 3.13-д `audioop` байхгүй тул хоёр зам
+# зэрэг ажиллана. Зөрвөл зарим хэрэглэгчид өөр дуу илгээгдэнэ.
+check(
+    "чангаруулалт хоёр замд ижил",
+    audio_module._normalize_python(quiet).tolist(),
+    audio_module._normalize_audioop(quiet).tolist(),
+)
+check(
+    "DC арилгалт хоёр замд ижил",
+    audio_module._remove_dc_python(array.array("h", [1000] * 100)).tolist(),
+    audio_module._remove_dc_audioop(array.array("h", [1000] * 100)).tolist(),
+)
+# `audioop.bias` халихдаа тойрч эргэдэг тул эргэлт үүсэх дуун дээр C зам нь
+# Python руу буцах ёстой — эс бөгөөс дээд цэг дээр шаржигнуур гарна
+clipping = array.array("h", [32767, -32768, 32000, 1000])
+check(
+    "халих дуун дээр Python зам руу буцна",
+    audio_module._remove_dc_audioop(clipping).tolist(),
+    audio_module._remove_dc_python(clipping).tolist(),
+)
+
 # Эхэн, төгсгөлд нь чимээгүйтэй дуу → тайрагдана
 padded = array.array("h", [0] * RATE)  # 1 сек чимээгүй
 padded.extend(int(9000 * math.sin(2 * math.pi * 220 * i / RATE)) for i in range(RATE // 2))
@@ -225,6 +249,9 @@ check("суваг тоо нийцнэ", CHANNELS, mics.MIN_CHANNELS)
 class FakeStream:
     def read(self, frames, exception_on_overflow=True):
         return b"\x00\x00" * frames
+
+    def get_read_available(self):
+        return 0
 
     def stop_stream(self):
         pass
@@ -303,6 +330,62 @@ check("нээлт унавал үндсэнээр", (error, opened), (None, None
 error, opened = record_with([("Sound Mapper", 0), SPEAKERS], headset_mic)
 check("төхөөрөмжгүй бол ойлгомжтой алдаа", error.startswith("Микрофон олдсонгүй"), True)
 check("төхөөрөмжгүй бол нээгдээгүй", opened, None)
+
+# --- товч суллах үед буферт хоцорсон сүүлчийн үе алдагдахгүй ---
+# `read()` нь CHUNK бүрдэх хүртэл хүлээдэг тул суллах агшинд микрофоны буферт
+# унших гараагүй хэсэг үлддэг. Өмнө нь тэр хэсэг хаягддаг байсан — яг тэнд
+# хэлсэн зүйлийн сүүлчийн үе («…юм», «…уу») байдаг.
+class TailStream:
+    """Буферт хэдэн хэсэг хоцорсон микрофоныг дуурайна."""
+
+    def __init__(self, pending):
+        self.pending = list(pending)
+        self.reads = 0
+
+    def get_read_available(self):
+        return CHUNK * len(self.pending)
+
+    def read(self, frames, exception_on_overflow=True):
+        self.reads += 1
+        return self.pending.pop(0) if self.pending else silence()
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        pass
+
+
+collected = []
+rec = audio_module.Recorder(
+    on_segment=lambda pcm, final: collected.append((pcm, final)), keep_open_seconds=0.0
+)
+rec._stream = TailStream([speech()] * 3)  # буферт хоцорсон 3 хэсэг
+rec._capturing.set()
+rec._finishing.set()
+for _ in range(4):
+    rec.segmenter.feed(silence())  # орчны чимээ
+for _ in range(8):
+    rec.segmenter.feed(speech())  # аль хэдийн уншсан яриа
+rec._finish_capture()
+
+check("сүүлчийн сегмент илгээгдсэн", len(collected), 1)
+check("«эцсийн» гэж тэмдэглэгдсэн", collected[0][1], True)
+# 12 уншсан + буферийн 3 + саатлын төлөө нэмж уншсан 1 = 16
+check("буферт хоцорсон хэсгүүд орсон", len(collected[0][0]), 16 * CHUNK * 2)
+check("бичих төлөв хаагдсан", rec.active, False)
+
+# Соруулж дуусахаас өмнө дахин бичиж эхэлбэл шинэ бичлэгийг таслахгүй
+restarted = []
+rec2 = audio_module.Recorder(
+    on_segment=lambda pcm, final: restarted.append((pcm, final)), keep_open_seconds=0.0
+)
+rec2._stream = FakeStream()
+rec2._capturing.set()
+rec2._finishing.clear()  # `start()` дохиог цуцалсан гэж үзье
+rec2._finish_capture()
+check("цуцлагдсан төгсгөл сегмент илгээхгүй", restarted, [])
+check("шинэ бичлэг үргэлжилнэ", rec2.active, True)
 
 print()
 print("FAILED" if fails else "ALL PASS")

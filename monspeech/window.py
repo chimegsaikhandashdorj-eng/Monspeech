@@ -83,6 +83,8 @@ WRITING_TOGGLES = [
      "Шинэ өгүүлбэрийн эхний үсгийг том болгоно"),
     ("voice_punctuation", "Дуут цэг таслал",
      "«цэг», «таслал», «шинэ мөр» гэж хэлэхэд тэмдэг болгоно"),
+    ("voice_numbers", "Тоог цифрээр",
+     "«хорин гурван цагт» гэж хэлэхэд «23 цагт» гэж бичнэ"),
     ("clean_speech", "Чигчлүүр цэвэрлэх",
      "«ааа», эхний «за», давхардсан үг, «үгүй ээ» гэж зассаныг хасна"),
 ]
@@ -133,6 +135,7 @@ SEARCH_INDEX = [
     ("Асаах / унтраах", 3, "товчлуур асаах унтраах toggle"),
     ("Буцаах", 3, "товчлуур буцаах undo"),
     ("Үг солих", 4, "толь үг солих орлуулга"),
+    ("Нэрс", 4, "толь нэр хүний нэр ойролцоо"),
     ("Дуут товчлол", 4, "толь товчлол snippet хаяг"),
     ("Таньсан текстүүд", 5, "түүх history текст"),
     ("Push-to-talk горим", 6, "push to talk горим"),
@@ -685,7 +688,10 @@ class ControlWindow:
 
     def _option_changed(self, key: str, value: bool) -> None:
         self.app.on_option_changed(key, value)
-        if key in ("auto_capitalize", "auto_space", "voice_punctuation", "clean_speech"):
+        if key in (
+            "auto_capitalize", "auto_space", "voice_punctuation",
+            "voice_numbers", "clean_speech",
+        ):
             self._refresh_preview()
 
     # --- 3. Бичилт --------------------------------------------------
@@ -716,15 +722,24 @@ class ControlWindow:
             "жагсаалтад нэмвэл зөвхөн тэнд шууд бичнэ.",
         )
         Button(holder, "Сүүлийн цонхыг нэмэх", self._remember_type_mode_app).pack()
+
+        row, holder = card.row(
+            "Цэвэрлэхгүй цонх",
+            "Үгчлэн бичүүлэх цонх (эш татах, ярианы тэмдэглэл). Тэнд "
+            "«Чигчлүүр цэвэрлэх» хүчингүй болно.",
+        )
+        Button(holder, "Сүүлийн цонхыг нэмэх", self._remember_no_clean_app).pack()
         page.spacer()
         self._refresh_preview()
 
     def _refresh_preview(self) -> None:
-        """Жишээ өгүүлбэр: «за ааа өнөөдрийн хурал 3 цагт болно цэг» гэж хэлсэн гэж үзнэ."""
+        """Жишээ: «за ааа өнөөдрийн хурал гурван цагт болно цэг» гэж хэлсэн гэж үзнэ."""
         cfg = self.app.cfg
-        text = "өнөөдрийн хурал 3 цагт болно"
+        text = "өнөөдрийн хурал гурван цагт болно"
         if not cfg["clean_speech"]:
             text = "за ааа " + text  # цэвэрлэхгүй бол хэлсэн чигээрээ
+        if cfg["voice_numbers"]:
+            text = textproc.spell_numbers(text)
         if cfg["voice_punctuation"]:
             text += "."
         if cfg["auto_capitalize"]:
@@ -733,6 +748,9 @@ class ControlWindow:
 
     def _remember_type_mode_app(self) -> None:
         self.set_detail(self.app.remember_type_mode_app())
+
+    def _remember_no_clean_app(self) -> None:
+        self.set_detail(self.app.remember_no_clean_app())
 
     # --- 4. Товчлуур ------------------------------------------------
     def _page_hotkeys(self) -> None:
@@ -769,7 +787,9 @@ class ControlWindow:
             Page(self.stack, "Толь", "Аппыг өөрийн нэр томьёо, хэллэгт сургана.")
         )
         tabs = SegmentedTabs(
-            page.body, ["Үг солих", "Дуут товчлол", "Аппын хэл"], self._dictionary_tab
+            page.body,
+            ["Үг солих", "Нэрс", "Дуут товчлол", "Аппын хэл"],
+            self._dictionary_tab,
         )
         tabs.pack(anchor="w", padx=theme.PAGE_PAD_X, pady=(0, theme.GAP))
 
@@ -787,6 +807,16 @@ class ControlWindow:
     #: Толины таб бүр: (зүүн шошго, баруун шошго, тохиргооны түлхүүр, тайлбар).
     DICTIONARY_TABS = (
         ("Буруу таньсан", "Зөв бичих", "replacements", ""),
+        (
+            "Нэр",
+            "Сонсогддог хувилбар (заавал биш)",
+            "names",
+            "Нэрийг ОЙРОЛЦООГООР таньдаг тул хувилбар бүрийг бичих "
+            "шаардлагагүй: «Чимэгсайхан» гэж нэг нэмэхэд «чимэг сайхан», "
+            "«чимэгсайхны» хоёулаа баригдана. Хол зөрдөг хувилбарыг баруун "
+            "талд таслалаар тусгаарлан нэмнэ. 6-аас богино нэр зөвхөн яг таг "
+            "таарвал солигдоно.",
+        ),
         ("Хэллэг", "Бүтэн текст", "snippets", ""),
         (
             "Цонхны нэрний хэсэг",
@@ -818,12 +848,13 @@ class ControlWindow:
     def _save_dictionary(self, mapping: dict) -> None:
         self._dictionary_save = None
         raw = textproc.format_replacements(mapping)
-        if self.dictionary_tab == 0:
-            self.app.on_replacements_changed(raw)
-        elif self.dictionary_tab == 1:
-            self.app.on_snippets_changed(raw)
-        else:
-            self.app.on_lang_apps_changed(raw)
+        handlers = (
+            self.app.on_replacements_changed,
+            self.app.on_names_changed,
+            self.app.on_snippets_changed,
+            self.app.on_lang_apps_changed,
+        )
+        handlers[self.dictionary_tab](raw)
 
     # --- 6. Түүх ----------------------------------------------------
     def _page_history(self) -> None:

@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 import tkinter as tk
 
@@ -85,6 +87,9 @@ class FakeApp:
     def remember_type_mode_app(self):
         return "«Notepad» цонхонд одооноос шууд бичнэ."
 
+    def remember_no_clean_app(self):
+        return "«Obsidian» цонхонд одооноос үгчлэн бичнэ."
+
     def on_lang_changed(self, code):
         self.cfg["lang"] = code
 
@@ -109,6 +114,10 @@ class FakeApp:
 
     def on_snippets_changed(self, raw):
         self.saved_snippets = raw
+        return raw.count("=")
+
+    def on_names_changed(self, raw):
+        self.saved_names = raw
         return raw.count("=")
 
     def on_lang_apps_changed(self, raw):
@@ -197,7 +206,7 @@ ui.search_var.set("")
 root.update()
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 13)
+check("чагтын тоо", len(ui.toggles), 14)
 check("хэл сэжиглэх чагт", "detect_language" in ui.toggles, True)
 check("шинэчлэл шалгах чагт", "check_updates" in ui.toggles, True)
 check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
@@ -228,8 +237,21 @@ check("мөр нэмэгдсэн", ui.pairs.mapping()["монспич"], "Monspe
 ui._save_dictionary(ui.pairs.mapping())
 check("толь хадгалагдсан", "монспич=Monspeech" in (app.saved_replacements or ""), True)
 
-# --- Толины гурав дахь таб: аппаар ялгах хэл ---
-ui._dictionary_tab(2)
+# --- Нэрсийн таб ---
+ui._dictionary_tab(1)
+root.update()
+check(
+    "нэрсийн баганын шошго",
+    (ui.pairs.head_a.cget("text"), ui.pairs.head_b.cget("text")),
+    ("НЭР", "СОНСОГДДОГ ХУВИЛБАР (ЗААВАЛ БИШ)"),
+)
+ui.pairs.add_row("Чимэгсайхан", "чимээ сайхан")
+root.update()
+ui._save_dictionary(ui.pairs.mapping())
+check("нэр хадгалагдсан", "Чимэгсайхан=чимээ сайхан" in (app.saved_names or ""), True)
+
+# --- Толины сүүлийн таб: аппаар ялгах хэл ---
+ui._dictionary_tab(3)
 root.update()
 check("аппын хэлний таб хоосон", ui.pairs.mapping(), {})
 check(
@@ -293,14 +315,16 @@ check("доод мөрөнд мэдэгдэл", ui.detail_var.get(), "Микро
 
 ui._remember_type_mode_app()
 check("шууд бичих холбоос", ui.detail_var.get(), "«Notepad» цонхонд одооноос шууд бичнэ.")
+ui._remember_no_clean_app()
+check("цэвэрлэхгүй холбоос", ui.detail_var.get(), "«Obsidian» цонхонд одооноос үгчлэн бичнэ.")
 
 # --- Бичилтийн урьдчилан харах ---
 ui.select(2)
 root.update()
-check("урьдчилан харах эхэлдэг", ui.preview_var.get().startswith("␣Өнөөдрийн"), True)
+check("урьдчилан харах эхэлдэг", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
 ui.toggles["auto_capitalize"]._clicked()
 root.update()
-check("том үсэг унтраахад тусав", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
+check("том үсэг асаахад тусав", ui.preview_var.get().startswith("␣Өнөөдрийн"), True)
 
 # --- Анх ажиллуулахад танилцуулга гарна, дараа нь дахин гарахгүй ---
 check("танилцуулга гарсан", shown(ui.welcome), True)
