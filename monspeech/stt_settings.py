@@ -65,7 +65,7 @@ class SttCard:
             variable = tk.StringVar(value=str(cfg[key]))
             self.vars[key] = variable
             self._field(holder, variable, secret=key == "stt_key")
-        self.extra.note("Түлхүүр тохиргооны файлд ил хадгалагдана")
+        self.extra.note("Түлхүүр Windows DPAPI-гаар шифрлэгдэж хадгалагдана")
 
         # Нэмэлт карт хаана орохыг тэмдэглэх зай — `before=` үүнийг заана
         self._tail = page.spacer()

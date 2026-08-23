@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from . import secret
+
 CONFIG_DIR = Path(os.path.expandvars(r"%AppData%")) / "Monspeech"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
@@ -80,7 +82,11 @@ DEFAULTS: dict[str, Any] = {
     "stt_provider": "google",
     "stt_url": "",
     "stt_model": "",
-    # ⚠️ Түлхүүр энд ил бичигдэнэ — апп нууц хадгалах сан ашигладаггүй
+    # Хэрэглэгчийн түлхүүр. Дискэн дээр `dpapi:…` хэлбэрээр ШИФРЛЭГДЭН
+    # хадгалагдана (secret.py — Windows DPAPI, шинэ dependencyгүй). Санах
+    # ойд болон UI-д үргэлж ил текст байна; `load`/`save` хоёулаа
+    # шифрлэлт/тайлалтыг автоматаар хийнэ. Хуучин ил текстийн файл нь
+    # эхний хадгалалтаараа шифрлэгдсэн хэлбэр рүү автоматаар шилждэг.
     "stt_key": "",
     # Эхлэхдээ GitHub-аас шинэ хувилбар гарсан эсэхийг шалгах (IP харагдана)
     "check_updates": True,
@@ -132,13 +138,21 @@ class Config(dict):
             for key, value in raw.items():
                 if key in DEFAULTS and _acceptable(key, value):
                     cfg[key] = value
+        # Түлхүүр файл дээр `dpapi:…` байвал тайлна; хуучин ил текст байвал хэвээр нь уншина
+        raw_key = str(cfg.get("stt_key") or "")
+        if secret.is_encrypted(raw_key):
+            cfg["stt_key"] = secret.decrypt(raw_key) or ""
+        else:
+            cfg["stt_key"] = raw_key
         return cfg
 
     def save(self) -> str | None:
         try:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            payload = dict(self)
+            payload["stt_key"] = secret.encrypt(self["stt_key"])
             CONFIG_PATH.write_text(
-                json.dumps(self, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         except OSError as exc:
             return str(exc)
