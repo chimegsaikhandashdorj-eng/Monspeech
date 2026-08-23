@@ -312,6 +312,21 @@ AMBIGUOUS_ALONE = frozenset({"нэг", "нэгэн", "ер", "сая", "тав",
 _ORDINAL_TAIL = re.compile(r"(?:дугаар|дүгээр)$")
 
 
+def _command_length(words: list[str], index: int) -> int:
+    """`index`-ээс эхлэх дуут командын урт (үгээр). Байхгүй бол 0.
+
+    Зарим команд ТООНЫ ҮГЭЭР эхэлдэг: «гурван цэг» (…), «хоёр цэг» (:).
+    Тэднийг тоо гэж идвэл «гурван цэг» нь «3» + «цэг» болж хувирч, эцэст нь
+    «3.» гэж бичигдэнэ — хэрэглэгчийн хүссэн «…» алга болно.
+    """
+    limit = min(MAX_COMMAND_WORDS, len(words) - index)
+    for size in range(limit, 0, -1):
+        phrase = " ".join(w.strip(_STRIP).lower() for w in words[index : index + size])
+        if phrase in VOICE_COMMANDS:
+            return size
+    return 0
+
+
 def _compose(values: list[int]) -> int | None:
     """Тооны үгсийн утгыг нэг тоо болгоно. Бүтэц нь тоо биш бол `None`.
 
@@ -357,6 +372,8 @@ def spell_numbers(raw: str) -> str:
         start = index
         run: list[int] = []
         while index < len(words):
+            if _command_length(words, index):
+                break  # дуут команд — тоо болгож идэж болохгүй
             value = NUMBER_WORDS.get(_core(words[index]))
             if value is None:
                 break
@@ -512,17 +529,23 @@ class Formatter:
         self.names = {k.strip(): v for k, v in (names or {}).items() if k.strip()}
         self._exact_names: dict[str, str] = {}
         self._fuzzy_names: list[tuple[str, str]] = []
+        # Цонхны урт нь бичсэн нэрсээс хамаарна: «Ган Эрдэнэ Бат» гэж гурван
+        # үгтэй нэр нэмсэн хүнд тогтмол 2 үгийн цонх нь хэзээ ч таарахгүй —
+        # нэмсэн зүйл нь чимээгүй ажиллахгүй байх нь хамгийн муу төрлийн алдаа.
+        self._max_name_words = MAX_NAME_WORDS
         for correct, aliases in self.names.items():
             key = _name_key(correct)
             if not key:
                 continue
             self._exact_names[key] = correct
+            self._max_name_words = max(self._max_name_words, len(correct.split()))
             if len(key) >= FUZZY_MIN_LENGTH:
                 self._fuzzy_names.append((key, correct))
             for alias in re.split(r"[,;]", aliases or ""):
                 alias_key = _name_key(alias)
                 if alias_key:
                     self._exact_names[alias_key] = correct
+                    self._max_name_words = max(self._max_name_words, len(alias.split()))
 
     def _match_name(self, words: list[str], index: int) -> tuple[str, int, str] | None:
         """Нэрийг таана: `(зөв бичлэг, идсэн үгийн тоо, нөхцөлийн дагавар)`.
@@ -530,7 +553,7 @@ class Formatter:
         Урт цонхноос эхэлнэ: «чимэг сайхан» гэж хоёр үг болж сонсогдсоныг
         нэг нэр болгож нийлүүлэхийн тулд.
         """
-        limit = min(MAX_NAME_WORDS, len(words) - index)
+        limit = min(self._max_name_words, len(words) - index)
         for size in range(limit, 0, -1):
             window = [w.strip(_STRIP).lower() for w in words[index : index + size]]
             if not all(window):
@@ -669,9 +692,16 @@ class Formatter:
             named = self._match_name(words, index)
             if named:
                 correct, size, ending = named
-                tail_word = words[index + size - 1]
+                # Тэмдэгтүүдийг `_replace_word`-ийн адил хоёр талаас нь
+                # хадгална — «"Чимэгсайхан» гэсэн эхний хашилт алдагдах ёсгүй.
+                head_word, tail_word = words[index], words[index + size - 1]
                 index += size
-                word = correct + ending + tail_word[len(tail_word.rstrip(_STRIP)) :]
+                word = (
+                    head_word[: len(head_word) - len(head_word.lstrip(_STRIP))]
+                    + correct
+                    + ending
+                    + tail_word[len(tail_word.rstrip(_STRIP)) :]
+                )
             else:
                 phrase = self._match_replacement(words, index)
                 if phrase:

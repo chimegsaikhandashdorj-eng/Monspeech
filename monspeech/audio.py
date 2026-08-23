@@ -506,7 +506,12 @@ class Recorder:
 
     def start(self) -> str | None:
         """Бичиж эхэлнэ. Алдаа гарвал мессежийг буцаана."""
-        if self.active:
+        # Өмнөх бичлэгийн ТӨГСГӨЛ хараахан дуусаагүй байж болно: `stop()` нь
+        # хүлээлгүй буцдаг тул тэр үед `_capturing` асаалттай хэвээр байна.
+        # Зөвхөн `active`-ийг харвал «аль хэдийн бичиж байна» гэж андуурч
+        # чимээгүй юу ч хийхгүй өнгөрнө — дараа нь `_finish_capture` төлвийг
+        # хааж, хэрэглэгчийн хэлсэн зүйл бүхэлдээ алга болно.
+        if self.active and not self._finishing.is_set():
             return None
         with self._seg_lock:
             self.segmenter.reset()
@@ -683,6 +688,14 @@ class Recorder:
                     # авах ажил ЭНД л хийгдэнэ — `stop()` хүлээхгүй буцсан.
                     self._finish_capture()
                     if self.keep_open_seconds <= 0:
+                        # Гарахаа сул зогсолтын замтай ижилхэн зарлана: эс
+                        # бөгөөс яг энэ хормын `start()` нь «урсгал нээлттэй»
+                        # гэж үзээд дулаан замаар буцах ба урсгал нь тэр дороо
+                        # хаагдаж, дараагийн бичлэг чимээгүй хоосон гарна.
+                        with self._state_lock:
+                            if self._capturing.is_set():
+                                continue  # яг одоо дахин эхэлчихлээ
+                            self._exiting = True
                         return  # `finally` дотор урсгал хаагдана
                     continue
                 if time.monotonic() - self.started_at > self.max_seconds:

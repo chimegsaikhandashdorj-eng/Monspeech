@@ -6,6 +6,7 @@
 import array
 import math
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -386,6 +387,27 @@ rec2._finishing.clear()  # `start()` дохиог цуцалсан гэж үзь
 rec2._finish_capture()
 check("цуцлагдсан төгсгөл сегмент илгээхгүй", restarted, [])
 check("шинэ бичлэг үргэлжилнэ", rec2.active, True)
+
+# --- Сорох ажил дуусаагүй байхад дахин товч дарвал бичлэг ЭХЛЭХ ёстой ---
+# `stop()` нь хүлээхгүй буцдаг тул тэр үед `_capturing` асаалттай хэвээр
+# байна. `start()` зөвхөн түүнийг харвал «аль хэдийн бичиж байна» гэж
+# андуурч юу ч хийхгүй өнгөрөх ба дараа нь `_finish_capture` төлвийг хааж,
+# хэрэглэгчийн хэлсэн зүйл бүхэлдээ чимээгүй алга болно.
+rec3 = audio_module.Recorder(on_segment=lambda pcm, final: None, keep_open_seconds=45.0)
+rec3._stream = FakeStream()
+# Урсгал нээлттэй (унших thread амьд) гэж үзүүлнэ — «дулаан» зам руу орно,
+# эс бөгөөс `start()` жинхэнэ төхөөрөмж нээхийг оролдоно
+_idle = threading.Event()
+_reader = threading.Thread(target=_idle.wait, daemon=True)
+_reader.start()
+rec3._thread = _reader
+rec3._capturing.set()
+rec3._finishing.set()  # `stop()` дуудагдаад төгсгөл нь хараахан дуусаагүй
+check("төгсгөл дуусаагүй ч дахин эхэлнэ", rec3.start(), None)
+check("дохио цуцлагдсан", rec3._finishing.is_set(), False)
+rec3._finish_capture()  # хожуу ирсэн төгсгөл шинэ бичлэгийг таслах ёсгүй
+check("шинэ бичлэг таслагдаагүй", rec3.active, True)
+_idle.set()
 
 print()
 print("FAILED" if fails else "ALL PASS")
