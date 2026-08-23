@@ -104,6 +104,12 @@ class OpenAICompatible(Provider):
                 "Танигчийн хаяг буруу байна — «Яриа» хуудсанаас шалгана уу."
             )
         secure = parsed.scheme == "https"
+        # Localhost биш бөгөөд нууцлалгүй HTTP холболт хэрэглэж байвал анхааруулна
+        if not secure and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            log.warning(
+                "аюулгүй бус HTTP холболтоор алсын сервер рүү хандаж байна (%s) — түлхүүр ба яриа ил сүлжээгээр дамжина",
+                parsed.hostname,
+            )
         port = parsed.port or (443 if secure else 80)
         path = parsed.path or "/"
         if parsed.query:

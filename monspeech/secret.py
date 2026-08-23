@@ -39,7 +39,6 @@ def _dll():
     global _crypt32
     if _crypt32 is None:
         dll = ctypes.WinDLL("crypt32")
-        blob = ctypes.Structure  # зөвхөн уншигдахаар тодорхойлно
         dll.CryptProtectData.argtypes = [
             ctypes.POINTER(_BLOB), wintypes.LPCWSTR, wintypes.LPVOID,
             wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
