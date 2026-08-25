@@ -99,6 +99,41 @@ check(
     Mic(1, ""),
 )
 
+# ----------------------------------------------------------------------
+# Системийн дуу (WASAPI loopback)
+# ----------------------------------------------------------------------
+speakers = Mic(9, "Headphones (AWEI AT100) [Loopback]")
+check("loopback таньдаг", speakers.is_loopback, True)
+check("микрофон бол үгүй", Mic(1, "Headset (AWEI)").is_loopback, False)
+check("үндсэн нь loopback биш", mics.SYSTEM.is_loopback, False)
+check(
+    "цонхонд ойлгомжтой нэр",
+    speakers.label,
+    "Чанга яригч · Headphones (AWEI AT100)",
+)
+
+# Жагсаалтад микрофонууд түрүүлж, системийн дуу хойно
+mixed = FakePyAudio(
+    [
+        ("Sound Mapper", 2),
+        ("Speakers (THX) [Loopback]", 2),
+        ("Headset (AWEI)", 1),
+    ]
+)
+labels = [mic.name for mic in mics.available(mixed)]
+check(
+    "loopback хамгийн хойно",
+    labels,
+    ["", "Sound Mapper", "Headset (AWEI)", "Speakers (THX) [Loopback]"],
+)
+
+# Төхөөрөмжийн мэдээллээр таних (PyAudioWPatch-ийн талбар)
+check("талбараар таних", mics.is_loopback_info({"isLoopbackDevice": True}), True)
+check("нэрээр таних", mics.is_loopback_info({"name": "X [Loopback]"}), True)
+check("энгийн микрофон", mics.is_loopback_info({"name": "Headset"}), False)
+check("хоосон мэдээлэл", mics.is_loopback_info({}), False)
+
+
 print()
 print("FAILED" if fails else "ALL PASS")
 for line in fails:

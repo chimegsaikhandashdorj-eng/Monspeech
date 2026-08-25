@@ -12,7 +12,6 @@ import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгон
 
 
 from monspeech import secret
-from monspeech.config import Config
 
 fails = []
 

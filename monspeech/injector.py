@@ -102,6 +102,22 @@ def _paste(text: str, restore_clipboard: bool, backspaces: int) -> None:
             pass
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """Текстийг clipboard руу хуулна. Clipboard түгжигдсэн бол `False`.
+
+    Түгжээг барина: оруулалт clipboard-ыг ашиглаад буцаан сэргээдэг тул
+    түүнтэй давхацвал хуулсан зүйл маань дарагдана.
+    """
+    if not text:
+        return False
+    with _lock:
+        try:
+            pyperclip.copy(text)
+        except pyperclip.PyperclipException:
+            return False
+    return True
+
+
 def type_text(text: str) -> None:
     """Шууд товчлуур дарж бичнэ (clipboard хөндөхгүй, гэхдээ удаан)."""
     with _lock:

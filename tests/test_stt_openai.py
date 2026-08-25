@@ -15,13 +15,15 @@ import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгон
 
 
 import monspeech.recognizer as recognizer_module
-from monspeech.recognizer import RecognitionError
+from monspeech.recognizer import RecognitionError, RecognitionResult
 from monspeech.stt_openai import OpenAICompatible, _multipart, _wav
 
 fails = []
 
 
 def check(label, got, want):
+    if isinstance(got, RecognitionResult):
+        got = (got.alternatives, got.confidence)
     ok = got == want
     if not ok:
         fails.append(f"{label}: got {got!r} want {want!r}")
@@ -49,6 +51,22 @@ check("хилийн мөр зарлагдсан", "boundary=" in content_type, T
 check("загвар орсон", b'name="model"' in body and b"whisper-1" in body, True)
 check("хэл орсон", b'name="language"' in body and b"mn" in body, True)
 check("файл орсон", b'filename="audio.wav"' in body and b"AUDIO" in body, True)
+# Толийн дохио: `prompt` талбараар явна, хоосон бол огт явахгүй
+talker = OpenAICompatible(url="https://x/v1/audio/transcriptions", model="whisper-1")
+talker.set_vocabulary("Чимэгсайхан, Claude")
+sent = {}
+talker._post = lambda pcm, rate, lang: sent.update(pcm=pcm, lang=lang) or (
+    200, b'{"text":"\u0442\u0435\u0441\u0442"}'
+)
+body, _ = _multipart({"model": "whisper-1", "prompt": talker.vocabulary}, b"A")
+check("дохио prompt-оор явна", b'name="prompt"' in body, True)
+check(
+    "дохио хоосон бол талбар байхгүй",
+    b'name="prompt"' in _multipart({"prompt": ""}, b"A")[0],
+    False,
+)
+check("дохио танигч дээр хадгалагдав", talker.vocabulary, "Чимэгсайхан, Claude")
+
 check(
     "хоосон талбар оруулахгүй",
     b'name="language"' in _multipart({"language": ""}, b"A")[0],
@@ -59,12 +77,17 @@ check(
 # Хариу задлах
 # ----------------------------------------------------------------------
 parse = OpenAICompatible._parse
-check("энгийн хариу", parse('{"text": "сайн байна уу"}'), (["сайн байна уу"], 1.0))
-check("зайг тайрна", parse('{"text": "  тест  "}'), (["тест"], 1.0))
-check("хоосон текст", parse('{"text": ""}'), ([], 0.0))
-check("текст талбаргүй", parse('{"task": "transcribe"}'), ([], 0.0))
-check("эвдэрсэн JSON", parse("{"), ([], 0.0))
-check("жагсаалт ирвэл", parse("[1, 2]"), ([], 0.0))
+check("энгийн хариу", parse('{"text": "сайн байна уу"}'), (["сайн байна уу"], None))
+check("зайг тайрна", parse('{"text": "  тест  "}'), (["тест"], None))
+check("хоосон текст", parse('{"text": ""}'), ([], None))
+check("текст талбаргүй", parse('{"task": "transcribe"}'), ([], None))
+check("эвдэрсэн JSON", parse("{"), ([], None))
+check("жагсаалт ирвэл", parse("[1, 2]"), ([], None))
+check(
+    "хариуны хэл normalize хийнэ",
+    parse('{"text":"hello", "language":"english"}').language,
+    "en-US",
+)
 
 # ----------------------------------------------------------------------
 # Тохиргоо дутуу бол шулуухан хэлнэ (чимээгүй бүтэлгүйтэхгүй)
@@ -91,7 +114,7 @@ expect_error(
 check(
     "хоосон дуунд хандахгүй",
     OpenAICompatible(url="https://example.test/x", model="m").recognize(b""),
-    ([], 0.0),
+    ([], None),
 )
 
 # ----------------------------------------------------------------------
@@ -123,16 +146,20 @@ def build(responses):
 real_sleep = recognizer_module.time.sleep
 try:
     provider, calls, slept = build([200])
-    check("амжилттай", provider.recognize(PCM), (["тест"], 1.0))
+    check("амжилттай", provider.recognize(PCM), (["тест"], None))
     check("хэл дамжсан", calls, ["mn-MN"])  # ISO болгох нь `_post` дотор
 
+    provider, calls, slept = build([200])
+    provider.recognize(PCM, lang="auto")
+    check("auto үед language албадахгүй", calls, [None])
+
     provider, calls, slept = build([429, 429, 200])
-    check("429-ийн дараа танив", provider.recognize(PCM), (["тест"], 1.0))
+    check("429-ийн дараа танив", provider.recognize(PCM), (["тест"], None))
     check("гурван оролдлого", len(calls), 3)
     check("хүлээлтийн дараалал", slept, [0.4, 1.0])
 
     provider, calls, slept = build([503, 200])
-    check("503 бол дахин оролдоно", provider.recognize(PCM), (["тест"], 1.0))
+    check("503 бол дахин оролдоно", provider.recognize(PCM), (["тест"], None))
 
     for status, fragment in ((401, "түлхүүр"), (403, "түлхүүр"), (404, "хаяг олдсонгүй")):
         provider, calls, slept = build([status, 200])
@@ -140,7 +167,7 @@ try:
         check(f"{status}-д дахин оролдоогүй", len(calls), 1)
 
     provider, calls, slept = build([OSError("тасарлаа"), 200])
-    check("тасалдлын дараа танив", provider.recognize(PCM), (["тест"], 1.0))
+    check("тасалдлын дараа танив", provider.recognize(PCM), (["тест"], None))
 
     provider, calls, slept = build([OSError("а"), OSError("б"), OSError("в")])
     expect_error("тасралтгүй тасалдал", provider, "Сүлжээний алдаа")

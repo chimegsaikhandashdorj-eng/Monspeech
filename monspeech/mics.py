@@ -19,7 +19,17 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-import pyaudio
+try:
+    # PyAudioWPatch нь PyAudio-ийн бүх API дээр WASAPI loopback (системийн
+    # дуу бичих) нэмсэн хувилбар. Байхгүй бол ердийн PyAudio-гоор ажиллана —
+    # зөвхөн «Системийн дуу» сонголт харагдахгүй.
+    import pyaudiowpatch as pyaudio
+
+    LOOPBACK_SUPPORTED = True
+except ImportError:  # pragma: no cover - суулгацаас хамаарна
+    import pyaudio
+
+    LOOPBACK_SUPPORTED = False
 
 from .logging_setup import get as get_logger
 
@@ -29,6 +39,11 @@ log = get_logger("mics")
 # тааруулахдаа бүтнээр нь: тайрсан нэр хэзээ ч бүтэн нэртэй таарахгүй.
 LABEL_LIMIT = 38
 SYSTEM_LABEL = "Системийн үндсэн"
+#: WASAPI loopback төхөөрөмжийн нэрэнд Windows өөрөө нэмдэг тэмдэг.
+LOOPBACK_MARK = "[Loopback]"
+#: Цонхонд эдгээрийг ялгаж харуулна — микрофон биш, чанга яригчийн дуу.
+#: Богино байх нь чухал: `LABEL_LIMIT` дотор төхөөрөмжийн нэр ч багтах ёстой.
+LOOPBACK_LABEL = "Чанга яригч"
 # Бичлэг моногоор явдаг (`audio.CHANNELS`). Энэ модуль `audio`-г импортлодоггүй
 # — эргэлдсэн импорт үүсэхээс сэргийлж. Хоёр тоо салсан эсэхийг тест шалгана.
 MIN_CHANNELS = 1
@@ -51,11 +66,25 @@ class Mic:
         return self.index < 0
 
     @property
+    def is_loopback(self) -> bool:
+        """Энэ нь микрофон биш, чанга яригчийн дууг сонсох суваг мөн үү.
+
+        Нэрээр нь тодорхойлно — тохиргоонд нэмэлт талбар хэрэггүй бөгөөд
+        хуучин тохиргоо ч ямар нэг шилжилтгүйгээр ажиллана.
+        """
+        return LOOPBACK_MARK.lower() in (self.name or "").lower()
+
+    @property
     def label(self) -> str:
         """Цонхонд харуулах нэр."""
         if self.is_default:
             return SYSTEM_LABEL
-        return (self.name or f"#{self.index}")[:LABEL_LIMIT]
+        name = self.name or f"#{self.index}"
+        if self.is_loopback:
+            # «Headphones (AWEI) [Loopback]» → «Системийн дуу · Headphones (AWEI)»
+            clean = name.replace(LOOPBACK_MARK, "").strip()
+            return f"{LOOPBACK_LABEL} · {clean}"[:LABEL_LIMIT]
+        return name[:LABEL_LIMIT]
 
     def save_to(self, cfg) -> None:
         """Тохиргооны аль түлхүүрт орохыг зөвхөн энэ модуль мэднэ."""
@@ -126,6 +155,24 @@ def _listens(pa, index: int) -> bool:
     return _channels(pa, index) >= MIN_CHANNELS
 
 
+def describe(pa, index: int) -> dict:
+    """Төхөөрөмжийн бүрэн мэдээлэл (олдохгүй бол хоосон толь)."""
+    return _info(pa, index) if index is not None and index >= 0 else {}
+
+
+def is_loopback_info(info: dict) -> bool:
+    """Энэ мэдээлэл нь loopback (системийн дуу) төхөөрөмжийнх мөн үү.
+
+    PyAudioWPatch нь `isLoopbackDevice` талбар нэмдэг; түүнийг олохгүй бол
+    Windows-ийн нэрэн дэх тэмдгээр таана.
+    """
+    if not info:
+        return False
+    if info.get("isLoopbackDevice"):
+        return True
+    return LOOPBACK_MARK.lower() in str(info.get("name", "")).lower()
+
+
 # ----------------------------------------------------------------------
 # Гадагшаа гарах гурван үйлдэл
 # ----------------------------------------------------------------------
@@ -137,6 +184,7 @@ def available(pa=None) -> list[Mic]:
     нь олоход ч хоёрдмол болгодог тул нэг нэрээс эхнийхийг нь л үлдээнэ.
     """
     found = [SYSTEM]
+    loopbacks: list[Mic] = []
     with _session(pa) as session:
         if session is None:
             return found
@@ -148,8 +196,11 @@ def available(pa=None) -> list[Mic]:
             if not name or name in seen:
                 continue
             seen.add(name)
-            found.append(Mic(index, name))
-    return found
+            mic = Mic(index, name)
+            # Системийн дууг жагсаалтын ХОЙНО тавина: энэ нь ховор сонголт
+            # бөгөөд микрофоны оронд санамсаргүй сонгогдох ёсгүй.
+            (loopbacks if mic.is_loopback else found).append(mic)
+    return found + loopbacks
 
 
 def load(cfg, pa=None) -> Mic:

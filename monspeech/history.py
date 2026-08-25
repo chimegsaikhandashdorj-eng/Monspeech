@@ -40,6 +40,20 @@ class InsertionHistory:
         with self._lock:
             return len(self._items)
 
+    def last(self, now: float | None = None) -> str | None:
+        """Сүүлийн оруулгыг УСТГАЛГҮЙ харна («давт», «хуулж ав» хоёрт).
+
+        Хэт хуучирсан бол `None` — буцаахтай ижил хугацааны хязгаар үйлчилнэ.
+        """
+        moment = now if now is not None else time.monotonic()
+        with self._lock:
+            if not self._items:
+                return None
+            text, when = self._items[-1]
+            if moment - when > self.max_age:
+                return None
+        return text
+
     def take_last(self, now: float | None = None) -> tuple[str, int] | None:
         """Сүүлийн оруулгыг гаргаж, `(текст, устгах тэмдэгтийн тоо)` буцаана.
 

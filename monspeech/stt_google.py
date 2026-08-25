@@ -17,7 +17,13 @@ import threading
 import urllib.parse
 
 from .logging_setup import get as get_logger
-from .recognizer import TIMEOUT, Provider, request
+from .recognizer import (
+    TIMEOUT,
+    Provider,
+    ProviderCapabilities,
+    RecognitionResult,
+    request,
+)
 
 log = get_logger("stt.google")
 
@@ -26,9 +32,13 @@ PATH = "/speech-api/v2/recognize"
 # Chromium-ийн задгай түлхүүр — бүртгэл, төлбөр шаардахгүй
 DEFAULT_KEY = "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw"
 
-# Хэдэн хувилбар гуйхаа. Хариу нэг л удаа ирдэг тул нэмэлт зардал үүсэхгүй;
-# хэрэглэгчийн толиор эргэж сонгоход хэрэг болно (textproc.choose_alternative).
-MAX_ALTERNATIVES = 3
+# Хэдэн хувилбар гуйхаа. Бүгд НЭГ хариунд ирдэг тул нэмэлт хүсэлт, нэмэлт
+# саатал, нэмэлт зардал үүсэхгүй — цөөн гуйх нь зөвхөн мэдээллээ хаяна гэсэн үг.
+# Зөв хариу #4, #5-д байх нь ховор биш: `textproc.choose_alternative()` толь,
+# түүх, хэлний загвараар эргэж сонгоход тэдгээр нь л түүхий материал болно.
+# Хэрэглэгч товчоор ээлжлүүлэх нь `pipeline.MAX_VARIANTS`-аар тусад нь
+# хязгаарлагдана — олон хувилбар нь сонгогчид хэрэгтэй, нүдэнд биш.
+MAX_ALTERNATIVES = 8
 
 # Энэ танигчид л онцгой статусууд. 429 ба ерөнхий тохиолдол `recognizer`-т.
 ERRORS = {403: "Таних үйлчилгээ түлхүүрийг хүлээж авсангүй (403)."}
@@ -39,6 +49,12 @@ class GoogleWebSpeech(Provider):
 
     name = "google"
     title = "Google (үнэгүй, түлхүүргүй)"
+    capabilities = ProviderCapabilities(
+        confidence=True,
+        hotwords=False,
+        auto_language=False,
+        code_switching=False,
+    )
 
     def __init__(self, lang: str = "mn-MN", key: str = DEFAULT_KEY) -> None:
         super().__init__(lang)
@@ -108,14 +124,14 @@ class GoogleWebSpeech(Provider):
 
     def recognize(
         self, pcm: bytes, rate: int = 16000, lang: str | None = None
-    ) -> tuple[list[str], float]:
+    ) -> RecognitionResult:
         """Үйлчилгээ түр ачаалагдсан (429) эсвэл 5xx гарвал дахин оролдоно.
 
         Эс бөгөөс хэрэглэгчийн хэлсэн өгүүлбэр бүрмөсөн алдагдаж, дахин
         ярихаас өөр арга үлдэхгүй.
         """
         if not pcm:
-            return [], 0.0
+            return RecognitionResult(language=lang or self.lang, provider=self.name)
         language = lang or self.lang
         with self._lock:
             body = request(
@@ -127,18 +143,18 @@ class GoogleWebSpeech(Provider):
                 on_network_error=self._forget_connection,
             )
 
-        return self._parse(body.decode("utf-8", "replace"))
+        return self._parse(body.decode("utf-8", "replace"), language)
 
     def _forget_connection(self) -> None:
         self._conn = None
 
     @staticmethod
-    def _parse(body: str) -> tuple[list[str], float]:
+    def _parse(body: str, language: str = "") -> RecognitionResult:
         """Хариу нь мөр бүрт нэг JSON — эхний утгатай үр дүнг бүхэлд нь авна.
 
         Нэг хэлсэн зүйлд `maxAlternatives`-ийн хэрээр хэд хэдэн хувилбар ирдэг.
         Эхнийх нь хамгийн магадлалтай нь бөгөөд итгэлцлийг зөвхөн түүнд өгдөг
-        (итгэлцэл байхгүй бол 1.0 гэж үзнэ — шүүлтгүй өнгөрнө). Үлдсэнийг нь
+            (итгэлцэл байхгүй бол `None` — шүүлтгүй өнгөрнө). Үлдсэнийг нь
         хаялгүй буцаана: хэрэглэгчийн толиор эргэж сонгоход хэрэг болно.
         """
         for line in body.splitlines():
@@ -151,15 +167,15 @@ class GoogleWebSpeech(Provider):
                 continue
             for item in data.get("result", []):
                 texts: list[str] = []
-                confidence = 1.0
+                confidence: float | None = None
                 for alternative in item.get("alternative") or []:
                     text = (alternative.get("transcript") or "").strip()
                     if not text:
                         continue
                     if not texts:
                         raw = alternative.get("confidence")
-                        confidence = float(raw) if isinstance(raw, (int, float)) else 1.0
+                        confidence = float(raw) if isinstance(raw, (int, float)) else None
                     texts.append(text)
                 if texts:
-                    return texts, confidence
-        return [], 0.0
+                    return RecognitionResult(texts, confidence, language, "google")
+        return RecognitionResult(language=language, provider="google")

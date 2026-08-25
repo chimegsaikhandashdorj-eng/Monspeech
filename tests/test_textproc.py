@@ -12,6 +12,10 @@ import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгон
 
 from monspeech.textproc import (
     Formatter,
+    edit_text,
+    vocabulary_hint,
+    label_actions,
+    parse_actions,
     choose_alternative,
     clean_speech,
     format_replacements,
@@ -323,10 +327,111 @@ check("үгийн араас «өө» бол бөөм", clean_speech("өгье �
 check("эхэнд байвал чимээ", clean_speech("аа тэгэхээр маргааш"), "тэгэхээр маргааш")
 check("сунгасан «ааа» хаана ч чимээ", clean_speech("за ааа маргааш уулзъя"), "маргааш уулзъя")
 
-check("буцаах команд", match_action("буцаа"), "undo")
-check("цэгтэй ч таних", match_action("Устга."), "undo")
+# --- preview нь дотоод төлвөө хөндөхгүй ---
+peek = Formatter(auto_capitalize=True)
+first = peek.preview("сайн байна уу")
+second = peek.preview("сайн байна уу")
+check("preview давтахад ижил", first, second)
+check("preview форматтай ижил", peek.format("сайн байна уу"), first)
+
+# --- Өгүүлбэр бүрд цэг ---
+period = Formatter(auto_capitalize=True)
+check("төгсгөлд цэг", period.format("маргааш уулзъя", end_sentence=True), ("Маргааш уулзъя. ", 0))
+check(
+    "дараагийн өгүүлбэр том үсгээр",
+    period.format("тэгье", end_sentence=True),
+    ("Тэгье. ", 0),
+)
+check(
+    "аль хэдийн цэгтэй бол давхарлахгүй",
+    Formatter().format("за цэг", end_sentence=True),
+    ("За. ", 0),
+)
+check(
+    "мөр таслалын араас цэг тавихгүй",
+    Formatter(auto_space=False).format("за шинэ мөр", end_sentence=True),
+    ("За" + chr(10), 0),
+)
+check("унтраалттай бол хэвээр", Formatter().format("за"), ("За ", 0))
+
+check("буцаах команд", match_action("буцаа"), ("undo", ""))
+check("цэгтэй ч таних", match_action("Устга."), ("undo", ""))
 check("өгүүлбэр дунд байвал үйлдэл биш", match_action("энэ файлыг устга"), None)
 check("энгийн үг", match_action("сайн байна уу"), None)
+check("давтах команд", match_action("давтаад бич"), ("repeat", ""))
+check("хуулах команд", match_action("хуулж ав"), ("copy", ""))
+check("зогсоох команд", match_action("зогс"), ("stop", ""))
+check("тоотой буцаах", match_action("хоёр удаа буцаа"), ("undo", "2"))
+check("«удаа»-гүй ч болно", match_action("гурав буцаа"), ("undo", "3"))
+check("цифрээр хэлсэн ч", match_action("2 давт"), ("repeat", "2"))
+check("тоо дэмждэггүй үйлдэл", match_action("хоёр удаа зогс"), None)
+check("тоо нь өгүүлбэрийн эхэнд л", match_action("буцаа хоёр"), None)
+check("хоосон", match_action("  ...  "), None)
+
+# --- Дуут засварын грамматик ---
+check("үг устгах", match_action("үг устга"), ("drop_words", ""))
+check("тоотой устгах", match_action("сүүлийн гурван үгийг устга"), ("drop_words", "3"))
+check("англиар", match_action("delete last 2 words"), ("drop_words", "2"))
+check("том үсэг", match_action("том үсэг болго"), ("capitalize", ""))
+check("жижиг үсэг", match_action("жижгээр болго"), ("lowercase", ""))
+check("зай авах", match_action("зайг ав"), ("no_space", ""))
+# Чөлөөт текст авдаг заавар нь ЗӨВХӨН команд горимд — энгийн бичилтэд
+# «оронд нь …» гэж хэлэхэд текст засагдах ёсгүй
+check("энгийн бичилтэд орлуулахгүй", match_action("оронд нь Claude"), None)
+check("команд горимд орлуулна", match_action("оронд нь Claude", command=True), ("replace_word", "Claude"))
+check("том үсэг хадгалагдав", match_action("Оронд нь Monspeech", command=True), ("replace_word", "Monspeech"))
+check("энгийн өгүүлбэр хэвээр", match_action("үг хэлэх нь чухал"), None)
+
+check("сүүлийн үг хаягдав", edit_text("нэг хоёр гурав ", "drop_words", "1"), "нэг хоёр ")
+check("хоёр үг хаягдав", edit_text("нэг хоёр гурав ", "drop_words", "2"), "нэг ")
+check("бүгд хаягдвал хоосон", edit_text("нэг хоёр ", "drop_words", "5"), "")
+check("том үсэг болов", edit_text("сайн байна ", "capitalize"), "сайн Байна ")
+check("тэмдэгт хөндөгдөхгүй", edit_text("сайн байна. ", "capitalize"), "сайн Байна. ")
+check("жижиг үсэг болов", edit_text("сайн Байна ", "lowercase"), "сайн байна ")
+check("аль хэдийн тийм бол хоосон", edit_text("сайн Байна ", "capitalize"), None)
+check("зай авагдав", edit_text("сайн байна ", "no_space"), "сайн байна")
+check("зайгүй бол хийх зүйлгүй", edit_text("сайн байна", "no_space"), None)
+check("сүүлийн үг солигдов", edit_text("клауд код. ", "replace_word", "Claude"), "клауд Claude. ")
+check("хоосон текст", edit_text("", "capitalize"), None)
+check("танихгүй засвар", edit_text("сайн ", "нислэг"), None)
+
+# --- Танигч руу илгээх дохио ---
+check(
+    "нэрс эхэлж, толийн зөв тал дараа",
+    vocabulary_hint(names={"Чимэгсайхан": ""}, replacements={"клауд": "Claude"}),
+    "Чимэгсайхан, Claude",
+)
+check(
+    "олон үгтэй нэр салгагдана",
+    vocabulary_hint(names={"Улаанбаатар хот": ""}),
+    "Улаанбаатар, хот",
+)
+check("давхардал хаягдана", vocabulary_hint(names={"Claude": ""}, replacements={"к": "claude"}), "Claude")
+check("хэт богино үг оролцохгүй", vocabulary_hint(names={"я": "", "Батаа": ""}), "Батаа")
+check("хоосон толь", vocabulary_hint(), "")
+check(
+    "хязгаараас хэтрэхгүй",
+    len(vocabulary_hint(names={f"Нэр{index}": "" for index in range(200)}, limit=40)) <= 40,
+    True,
+)
+check(
+    "сүүлийн текстээс үг нэмнэ",
+    vocabulary_hint(recent=["Monspeech сайхан ажиллаж байна"], limit=40),
+    "Monspeech, сайхан, ажиллаж, байна",
+)
+
+# --- Хэрэглэгчийн нэмсэн үйлдэл ---
+mine = parse_actions(
+    "\n".join(
+        ["цуцал=буцаах", "дахин уншуул=repeat", "хачин=нисэх", "=буцаах"]
+    )
+)
+check("зөв мөрүүд л үлдэнэ", mine, {"цуцал": "undo", "дахин уншуул": "repeat"})
+check("хэрэглэгчийн үйлдэл ажиллана", match_action("цуцал", mine), ("undo", ""))
+check("тоо нь ч ажиллана", match_action("хоёр удаа цуцал", mine), ("undo", "2"))
+check("дотоод нь хэвээр", match_action("буцаа", mine), ("undo", ""))
+check("толинд байхгүй бол үйлдэл биш", match_action("хачин", mine), None)
+check("монголоор буцаана", label_actions(mine)["цуцал"], "буцаах")
 
 print()
 print("FAILED" if fails else "ALL PASS")

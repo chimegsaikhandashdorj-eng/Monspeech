@@ -13,6 +13,8 @@ import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгон
 
 
 from monspeech import recognizer
+import monspeech.recognizer as recognizer_module
+from monspeech.recognizer import RecognitionResult, coerce_result
 from monspeech.config import DEFAULTS
 from monspeech.stt_google import GoogleWebSpeech
 from monspeech.stt_openai import OpenAICompatible
@@ -78,6 +80,33 @@ for cls in (GoogleWebSpeech, OpenAICompatible):
 names = [name for name, _ in recognizer.titles()]
 check("жагсаалтын нэрс", names, ["google", "openai"])
 check("анхны утга жагсаалтад бий", DEFAULTS["stt_provider"] in names, True)
+
+# --- Шинэ баялаг хариу ба provider capability ---
+legacy = coerce_result((["хуучин provider"], 0.8), language="mn-MN", provider="fake")
+check("хуучин tuple хөрвөнө", isinstance(legacy, RecognitionResult), True)
+check("tuple-ийн текст", legacy.text, "хуучин provider")
+check("Google native auto биш", GoogleWebSpeech.capabilities.auto_language, False)
+check("OpenAI-compatible auto", OpenAICompatible.capabilities.auto_language, True)
+check("OpenAI confidence байхгүй", OpenAICompatible.capabilities.confidence, False)
+
+# --- Толийн дохио танигч дээр тавигдана ---
+boosted = recognizer_module.create(
+    {
+        "stt_provider": "openai",
+        "stt_url": "https://x/v1/audio/transcriptions",
+        "stt_model": "whisper-1",
+        "names": {"Чимэгсайхан": ""},
+        "replacements": {"клауд": "Claude"},
+    }
+)
+check("дохио тавигдсан", boosted.vocabulary, "Чимэгсайхан, Claude")
+
+silent = recognizer_module.create(
+    {"stt_provider": "google", "names": {"Батаа": ""}, "vocabulary_boost": False}
+)
+check("унтраалттай бол хоосон", silent.vocabulary, "")
+check("Google-д ч талбар бий", hasattr(silent, "set_vocabulary"), True)
+
 
 print()
 print("FAILED" if fails else "ALL PASS")

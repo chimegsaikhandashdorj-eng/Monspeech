@@ -22,6 +22,8 @@ from monspeech.audio import (
     RATE,
     Recorder,
     Segmenter,
+    highpass,
+    noise_gate,
     normalize,
     prepare_segment,
     remove_dc,
@@ -408,6 +410,147 @@ check("дохио цуцлагдсан", rec3._finishing.is_set(), False)
 rec3._finish_capture()  # хожуу ирсэн төгсгөл шинэ бичлэгийг таслах ёсгүй
 check("шинэ бичлэг таслагдаагүй", rec3.active, True)
 _idle.set()
+
+
+# ----------------------------------------------------------------------
+# Урьдчилсан буфер: товч дарахаас өмнөх дуу
+# ----------------------------------------------------------------------
+pre = Recorder(on_segment=lambda pcm, final: None, preroll_seconds=0.5)
+limit = pre._preroll_limit()
+check("багтаамж секундээс тооцогдоно", limit, int(0.5 * RATE / CHUNK))
+
+for _ in range(limit + 5):
+    pre._remember_preroll(silence())
+check("хязгаараас хэтрэхгүй", len(pre._preroll), limit)
+
+# Унтраасан үед огт хураахгүй
+off = Recorder(on_segment=lambda pcm, final: None, preroll_seconds=0.0)
+off._remember_preroll(speech())
+check("унтраалттай бол хоосон", len(off._preroll), 0)
+
+# Хураасан дуу сегментчлэгч рүү орно: 3 хэсэг чимээгүй + 3 хэсэг яриа өгвөл
+# сегмент хараахан гарахгүй (яриа үргэлжилж байна) ч буфер нь хоосорно
+pre2 = Recorder(on_segment=lambda pcm, final: None, preroll_seconds=0.5)
+for _ in range(3):
+    pre2._remember_preroll(silence())
+for _ in range(3):
+    pre2._remember_preroll(speech())
+check("залгахад сегмент гараагүй", pre2._inject_preroll(), None)
+check("залгасны дараа буфер хоосон", len(pre2._preroll), 0)
+check("сегментчлэгчид хэсгүүд орсон", len(pre2.segmenter._frames), 6)
+
+# Бичлэг дуусахад буфер цэвэрлэгдэнэ — сая бичсэн зүйл дахин орох ёсгүй
+pre3 = Recorder(on_segment=lambda pcm, final: None, preroll_seconds=0.5)
+pre3._remember_preroll(speech())
+pre3._finishing.set()
+pre3._capturing.set()
+pre3._finish_capture()
+check("бичлэг дуусахад цэвэрлэгдэв", len(pre3._preroll), 0)
+
+
+# ----------------------------------------------------------------------
+# Чимээ дарах
+# ----------------------------------------------------------------------
+import math as _math  # noqa: E402 - зөвхөн энэ хэсэгт хэрэгтэй
+
+
+def tone(hz, amplitude=8000, seconds=1.0):
+    count = int(RATE * seconds)
+    return array.array(
+        "h",
+        [int(amplitude * _math.sin(2 * _math.pi * hz * i / RATE)) for i in range(count)],
+    )
+
+
+# Доод давтамжийг дарж, ярианы давтамжийг бараг хөндөхгүй
+low = tone(50)
+speech = tone(1000)
+low_before, low_after = rms(low.tobytes()), rms(highpass(low, RATE).tobytes())
+speech_before, speech_after = rms(speech.tobytes()), rms(highpass(speech, RATE).tobytes())
+check("50 Гц гүнгэнээ дарагдав", low_after < low_before * 0.35, True)
+check("1 кГц яриа хэвээр", speech_after > speech_before * 0.9, True)
+check("урт өөрчлөгдөхгүй", len(highpass(low, RATE)), len(low))
+check("хоосон дуу", len(highpass(array.array("h"), RATE)), 0)
+
+# Чимээт завсрыг сулруулж, яриаг хөндөхгүй
+mixed = tone(200, 300, seconds=2.0)
+for index in range(8000, 20000):
+    mixed[index] = max(-32768, min(32767, mixed[index] + int(9000 * _math.sin(
+        2 * _math.pi * 500 * index / RATE))))
+gated = noise_gate(mixed)
+check("завсрын чимээ сулрав", rms(gated[:6000].tobytes()) < rms(mixed[:6000].tobytes()) * 0.5, True)
+check(
+    "яриа хэвээр үлдэв",
+    rms(gated[9000:19000].tobytes()) > rms(mixed[9000:19000].tobytes()) * 0.95,
+    True,
+)
+check("урт хэвээр", len(gated), len(mixed))
+check("богино дууг хөндөхгүй", len(noise_gate(tone(300, seconds=0.02))), int(RATE * 0.02))
+
+# Бүхэлдээ жигд дуу — юу ч сулруулахгүй (таних шат өөрөө шийднэ)
+flat = tone(300, 5000)
+check("жигд дууг хөндөхгүй", noise_gate(flat) == flat, True)
+
+# `prepare_segment` нь зөвхөн хүсэхэд л чимээ дарна
+noisy = tone(60, 2000, seconds=1.0).tobytes()
+check(
+    "унтраалттай бол хөндөхгүй",
+    rms(prepare_segment(noisy, RATE)) > rms(prepare_segment(noisy, RATE, denoise=True)),
+    True,
+)
+
+
+# ----------------------------------------------------------------------
+# Системийн дуу: эх формат ба хөрвүүлэлт
+# ----------------------------------------------------------------------
+class FakeDevices:
+    """`get_device_info_by_index`-ийг л дуурайна."""
+
+    def __init__(self, devices):
+        self.devices = devices
+
+    def get_device_count(self):
+        return len(self.devices)
+
+    def get_device_info_by_index(self, index):
+        return self.devices[index]
+
+
+recorder = Recorder(on_segment=lambda pcm, final: None)
+recorder._pa = FakeDevices(
+    [
+        {"name": "Headset", "maxInputChannels": 1, "defaultSampleRate": 44100.0},
+        {
+            "name": "Speakers [Loopback]",
+            "maxInputChannels": 2,
+            "defaultSampleRate": 48000.0,
+            "isLoopbackDevice": True,
+        },
+    ]
+)
+check("энгийн микрофон 16 кГц моно", recorder._device_format(0), (1, RATE))
+check("системийн дуу эх форматаар", recorder._device_format(1), (2, 48000))
+check("үндсэн төхөөрөмж", recorder._device_format(None), (1, RATE))
+
+# 48 кГц стерео → 16 кГц моно
+recorder._source_channels = 2
+recorder._source_rate = 48000
+recorder._resample_state = None
+stereo = array.array("h")
+for index in range(4800):  # 0.1 сек @ 48 кГц
+    value = int(6000 * math.sin(2 * math.pi * 300 * index / 48000))
+    stereo.extend((value, value))
+converted = recorder._to_pipeline_format(stereo.tobytes())
+check("гуравны нэг болов", abs(len(converted) - 1600 * 2) <= 8, True)
+check("дуу алдагдаагүй", rms(converted) > 3000, True)
+
+# Ердийн микрофоны хэсгийг хөндөхгүй
+recorder._source_channels = 1
+recorder._source_rate = RATE
+plain = b"\x01\x02" * 100
+check("хөрвүүлэх шаардлагагүй", recorder._to_pipeline_format(plain), plain)
+check("хоосон хэсэг", recorder._to_pipeline_format(b""), b"")
+
 
 print()
 print("FAILED" if fails else "ALL PASS")

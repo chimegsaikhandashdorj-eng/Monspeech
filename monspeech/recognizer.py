@@ -21,6 +21,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 # Сүлжээний давхаргаас гарах алдаанууд — `OSError`-той хамт барина.
@@ -39,6 +40,63 @@ TIMEOUT = 15.0
 
 class RecognitionError(Exception):
     """Хэрэглэгчид харуулах алдаа."""
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Танигчийн боломжууд — pipeline таамгаар биш, илээр шийдвэр гаргана."""
+
+    auto_language: bool = False
+    confidence: bool = True
+    word_timestamps: bool = False
+    hotwords: bool = False
+    code_switching: bool = False
+
+
+@dataclass
+class RecognitionResult:
+    """Нэг танилтын бүрэн хариу.
+
+    `confidence=None` бол үйлчилгээ итгэлцэл өгөөгүй гэсэн үг. Энэ нь 1.0
+    итгэлцлээс эрс өөр: босгоор шүүхгүй боловч хэл сонгохдоо төгс нотолгоо гэж
+    үзэхгүй.
+    """
+
+    alternatives: list[str] = field(default_factory=list)
+    confidence: float | None = None
+    language: str = ""
+    provider: str = ""
+    raw_text: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.raw_text and self.alternatives:
+            self.raw_text = self.alternatives[0]
+
+    @property
+    def text(self) -> str:
+        return self.alternatives[0] if self.alternatives else ""
+
+    @property
+    def confidence_available(self) -> bool:
+        return self.confidence is not None
+
+
+def coerce_result(
+    value: RecognitionResult | tuple[list[str], float | None],
+    *,
+    language: str = "",
+    provider: str = "",
+) -> RecognitionResult:
+    """Хуучин provider/fake-ийн tuple хариуг шинэ гэрээнд оруулна."""
+
+    if isinstance(value, RecognitionResult):
+        if not value.language and language:
+            value.language = language
+        if not value.provider and provider:
+            value.provider = provider
+        return value
+    alternatives, confidence = value
+    return RecognitionResult(list(alternatives), confidence, language, provider)
 
 
 # Танигч бүрт ижил утгатай статусууд. Тусгайлан бичихгүй бол эдгээр хүчинтэй.
@@ -106,20 +164,29 @@ class Provider:
     хийхгүй өвлөнө.
     """
 
+    name = "provider"
+    capabilities = ProviderCapabilities()
+
     def __init__(self, lang: str = "mn-MN") -> None:
         self.lang = lang
+        # Хэрэглэгчийн толиос бэлдсэн «хүлээгдэж байгаа үгс». Дэмждэг танигч
+        # (Whisper-төрлийн `prompt`) л ашиглана, бусад нь чимээгүй үл хэрэгсэнэ.
+        self.vocabulary = ""
 
     def recognize(
         self, pcm: bytes, rate: int = 16000, lang: str | None = None
-    ) -> tuple[list[str], float]:
+    ) -> RecognitionResult:
         """PCM дууг текст болгоно.
 
-        `(хувилбарууд, итгэлцэл)` хосыг буцаана. Хувилбарууд нь магадлалын
-        дарааллаар — эхнийх нь хамгийн магадлалтай. Юу ч танигдаагүй бол
-        `([], 0.0)`. Итгэлцэл өгөх боломжгүй үйлчилгээ 1.0 буцаана (шүүлтгүй
-        өнгөрнө).
+        Хувилбарууд нь магадлалын дарааллаар — эхнийх нь хамгийн магадлалтай.
+        Юу ч танигдаагүй бол хоосон `RecognitionResult`. Итгэлцэл өгөх
+        боломжгүй үйлчилгээ `confidence=None` буцаана.
         """
         raise NotImplementedError
+
+    def set_vocabulary(self, hint: str) -> None:
+        """Толь солигдоход дохиог шинэчилнэ (танигчийг дахин бүтээхгүй)."""
+        self.vocabulary = str(hint or "")
 
     def prewarm(self) -> None:
         """Холболтыг урьдчилан нээх боломжтой бол нээнэ."""
@@ -161,16 +228,30 @@ PROVIDERS: dict[str, tuple[str, Callable[[dict[str, Any], str], Provider]]] = {
 DEFAULT_PROVIDER = "google"
 
 
-def create(cfg: dict[str, Any]) -> Provider:
+def vocabulary_for(cfg: dict[str, Any]) -> str:
+    """Тохиргооны тольноос дохионы мөр (унтраалттай бол хоосон)."""
+    if not cfg.get("vocabulary_boost", True):
+        return ""
+    from .textproc import vocabulary_hint
+
+    return vocabulary_hint(
+        names=dict(cfg.get("names") or {}),
+        replacements=dict(cfg.get("replacements") or {}),
+    )
+
+
+def create(cfg: dict[str, Any], lang: str | None = None) -> Provider:
     """Тохиргоонд заасан танигчийг үүсгэнэ.
 
     Танихгүй нэр бичигдсэн (гараар config.json засах, хуучин хувилбар) бол
     чимээгүй анхны танигч руу буцна — апп ажиллахаа болихоос дээр.
     """
     name = str(cfg.get("stt_provider") or DEFAULT_PROVIDER)
-    lang = str(cfg.get("lang") or "mn-MN")
+    lang = str(lang or cfg.get("lang") or "mn-MN")
     _, build = PROVIDERS.get(name) or PROVIDERS[DEFAULT_PROVIDER]
-    return build(cfg, lang)
+    provider = build(cfg, lang)
+    provider.set_vocabulary(vocabulary_for(cfg))
+    return provider
 
 
 def titles() -> list[tuple[str, str]]:

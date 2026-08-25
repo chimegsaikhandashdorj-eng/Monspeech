@@ -19,6 +19,8 @@ import re
 from collections import deque
 from collections.abc import Iterable
 
+from .langmodel import BigramModel
+
 #: `Formatter` хэдэн батлагдсан өгүүлбэрийг санаж хувилбар сонгоход ашиглах вэ.
 #: Богино зориуд: хэт урт бол хуучин сэдвийн үг өнөөдрийнхийг дийлж эхэлнэ.
 HISTORY_MEMORY = 40
@@ -64,19 +66,204 @@ MAX_COMMAND_WORDS = max(len(k.split()) for k in VOICE_COMMANDS)
 # Дуут үйлдлүүд. Аюулгүйн үүднээс зөвхөн хэлсэн зүйл нь ЗӨВХӨН энэ үг байвал
 # ажиллана — "энэ файлыг устга" гэж бичүүлэхэд текст устахгүй байх ёстой.
 VOICE_ACTIONS = {
+    # сүүлд оруулсан текстийг устгах
     "буцаа": "undo",
     "устга": "undo",
     "болих": "undo",
     "буцаах": "undo",
     "undo": "undo",
     "scratch that": "undo",
+    # сүүлийн оруулгыг дахин буулгах
+    "давт": "repeat",
+    "давтаад бич": "repeat",
+    "дахин бич": "repeat",
+    "repeat that": "repeat",
+    # сүүлийн текстийг clipboard руу хуулах (курсор дээр юу ч оруулахгүй)
+    "хуулж ав": "copy",
+    "хуулаад ав": "copy",
+    "copy that": "copy",
+    # сонсохоо болих (F9-ийн үргэлжилсэн горимд хэрэгтэй)
+    "зогс": "stop",
+    "бичихээ боль": "stop",
+    "stop recording": "stop",
 }
 
+#: Үйлдлийн нэр → цонхонд харагдах монгол шошго. Хэрэглэгч «Толь → Дуут
+#: үйлдэл» дээр өөрийн хэллэг нэмэхдээ баруун талд эдгээрийн НЭГИЙГ бичнэ.
+ACTION_LABELS = {
+    "undo": "буцаах",
+    "repeat": "давтах",
+    "copy": "хуулах",
+    "stop": "зогсоох",
+}
+_LABEL_TO_ACTION = {label: action for action, label in ACTION_LABELS.items()}
 
-def match_action(raw: str) -> str | None:
-    """Хэлсэн зүйл бүхэлдээ дуут үйлдэл мөн эсэх."""
-    phrase = " ".join(word.strip(_STRIP).lower() for word in raw.split() if word.strip(_STRIP))
+#: Давталтын тоо зөвшөөрдөг үйлдлүүд: «хоёр удаа буцаа» → ("undo", "2").
+#: Бусад үйлдэлд тоо утгагүй тул зөвшөөрөхгүй — «гурав зогс» гэдэг нь
+#: команд биш, энгийн яриа байх магадлал өндөр.
+COUNTED_ACTIONS = frozenset({"undo", "repeat"})
+
+#: Хамгийн ихдээ 99 удаа — «зуун удаа буцаа» гэж санамсаргүй хэлэхэд бүх
+#: түүхийг цоолохоос сэргийлнэ (`InsertionHistory`-ийн багтаамж ч бага).
+_ACTION_COUNT = re.compile(r"^(\d{1,2})\s+(?:удаа\s+)?(.+)$")
+
+
+#: Засварын дуут заавар: (хэв маяг, үйлдэл, зөвхөн команд горимд эсэх).
+#:
+#: Чөлөөт текст авдаг заавар нь ЗӨВХӨН команд горимд ажиллана — «оронд нь би
+#: явлаа» гэж энгийн бичилтэд хэлэхэд текст засагдвал хэрэглэгч юу болсныг
+#: ойлгохгүй. Тоо, эсвэл аргументгүй заавар нь хоёр горимд ажиллана.
+_EDIT_PATTERNS: tuple[tuple[re.Pattern, str, bool], ...] = (
+    # «сүүлийн 3 үгийг устга», «үг устга», «delete last 2 words»
+    (re.compile(r"^(?:сүүлийн\s+)?(\d+)?\s*үг(?:ийг|ийн)?\s+устга[ай]?$"), "drop_words", False),
+    (re.compile(r"^delete\s+(?:the\s+)?(?:last\s+)?(\d+)?\s*words?$"), "drop_words", False),
+    # «том үсэг болго», «том үсгээр»
+    (re.compile(r"^том\s+үсэг(?:ээр)?(?:\s+болго)?$"), "capitalize", False),
+    (re.compile(r"^том\s+үсгээр(?:\s+болго)?$"), "capitalize", False),
+    (re.compile(r"^capitali[sz]e(?:\s+that)?$"), "capitalize", False),
+    # «жижиг үсэг болго»
+    (re.compile(r"^жижиг\s+үсэг(?:ээр)?(?:\s+болго)?$"), "lowercase", False),
+    (re.compile(r"^жижгээр(?:\s+болго)?$"), "lowercase", False),
+    (re.compile(r"^lowercase(?:\s+that)?$"), "lowercase", False),
+    # «зайг ав» — цэг таслалыг гараар залруулахад
+    (re.compile(r"^зай(?:г)?\s+ав(?:ах)?$"), "no_space", False),
+    (re.compile(r"^no\s+space$"), "no_space", False),
+    # «оронд нь Claude» — сүүлийн үгийг чөлөөт текстээр сольно (зөвхөн команд)
+    (re.compile(r"^оронд\s+нь\s+(.+)$"), "replace_word", True),
+    (re.compile(r"^instead\s+(.+)$"), "replace_word", True),
+)
+
+
+def match_edit(
+    phrase: str, command: bool, spoken: str = ""
+) -> tuple[str, str] | None:
+    """Засварын заавар мөн эсэх. `(үйлдэл, аргумент)` эсвэл `None`.
+
+    `phrase` нь жижиг үсгээр (тааруулахад), `spoken` нь хэлсэн ЧИГЭЭРЭЭ —
+    «оронд нь Claude» гэхэд орлуулах текстийн том үсэг хадгалагдана.
+    Жижиг үсэг болгох нь уртыг өөрчилдөггүй тул байрлал нь тааарна.
+    """
+    for pattern, action, command_only in _EDIT_PATTERNS:
+        if command_only and not command:
+            continue
+        found = pattern.match(phrase)
+        source = spoken if spoken and len(spoken) == len(phrase) else phrase
+        if not found:
+            # Тоог үгээр хэлсэн байж болно: «гурван үгийг устга»
+            found = pattern.match(spell_numbers(phrase))
+            source = ""
+        if not found:
+            continue
+        if not found.groups():
+            return action, ""
+        if source:
+            argument = source[found.start(1):found.end(1)] if found.group(1) else ""
+        else:
+            argument = found.group(1) or ""
+        return action, argument.strip()
+    return None
+
+
+def _split_word(word: str) -> tuple[str, str, str]:
+    """Үгийг `(эхний тэмдэгт, цөм, төгсгөлийн тэмдэгт)` болгож хуваана."""
+    head = word[: len(word) - len(word.lstrip(_STRIP))]
+    core = word.strip(_STRIP)
+    tail = word[len(head) + len(core):]
+    return head, core, tail
+
+
+def edit_text(text: str, kind: str, argument: str = "") -> str | None:
+    """Сүүлд оруулсан текстийг дуут заавраар засна. Боломжгүй бол `None`.
+
+    Бүх засвар нь «хуучин текстийг бүтнээр солих» болж хэрэгжинэ: дуудагч
+    хуучныг тэмдэгтийн тоогоор устгаад шинийг оруулна. Ингэснээр курсор
+    дээрх байдал ба аппын санаж байгаа зүйл хоёр хэзээ ч зөрөхгүй.
+
+    Захын зайг хадгална — «Зай нэмэх» тохиргоотой хүнд дараагийн үг
+    залгаж орох ёстой.
+    """
+    if not text:
+        return None
+    body = text.rstrip()
+    trailing = text[len(body):]
+    words = body.split()
+
+    if kind == "no_space":
+        return body if trailing else None
+    if not words:
+        return None
+
+    if kind == "drop_words":
+        try:
+            count = max(1, int(argument or 1))
+        except ValueError:
+            count = 1
+        kept = words[:-count] if count < len(words) else []
+        if not kept:
+            return ""  # бүх үг хаягдана — цэвэр устгал болно
+        return " ".join(kept) + trailing
+
+    if kind in ("capitalize", "lowercase"):
+        head, core, tail = _split_word(words[-1])
+        if not core:
+            return None
+        changed = (core[0].upper() if kind == "capitalize" else core[0].lower()) + core[1:]
+        if changed == core:
+            return None  # аль хэдийн тийм байна
+        words[-1] = head + changed + tail
+        return " ".join(words) + trailing
+
+    if kind == "replace_word":
+        if not argument:
+            return None
+        head, core, tail = _split_word(words[-1])
+        if not core:
+            return None
+        words[-1] = head + argument.strip() + tail
+        return " ".join(words) + trailing
+
+    return None
+
+
+def _action_for(phrase: str, extra: dict[str, str] | None) -> str | None:
+    """Хэрэглэгчийн толь эхэлж үзэгдэнэ — өөрийн хэллэг нь дийлэх ёстой."""
+    if extra:
+        action = extra.get(phrase)
+        if action:
+            return action
     return VOICE_ACTIONS.get(phrase)
+
+
+def match_action(
+    raw: str, extra: dict[str, str] | None = None, command: bool = False
+) -> tuple[str, str] | None:
+    """Хэлсэн зүйл бүхэлдээ дуут үйлдэл мөн бол `(үйлдэл, аргумент)`.
+
+    `extra` нь хэрэглэгчийн нэмсэн {хэллэг: үйлдэл} толь — «Толь → Дуут
+    үйлдэл» табаас ирнэ.
+
+    Аргумент нь одоогоор давталтын тоо ("2") эсвэл хоосон мөр. Тоо нь
+    заавал бүхэл өгүүлбэрийн ЭХЭНД байна: «хоёр удаа буцаа». Тооны үгийг
+    цифр болгож үзэх тул `voice_numbers` тохиргооноос үл хамаарна.
+    """
+    spoken = " ".join(word.strip(_STRIP) for word in raw.split() if word.strip(_STRIP))
+    phrase = spoken.lower()
+    if not phrase:
+        return None
+    action = _action_for(phrase, extra)
+    if action:
+        return action, ""
+    edit = match_edit(phrase, command, spoken)
+    if edit:
+        return edit
+    counted = _ACTION_COUNT.match(spell_numbers(phrase))
+    if not counted:
+        return None
+    action = _action_for(counted.group(2), extra)
+    if action not in COUNTED_ACTIONS:
+        return None
+    return action, counted.group(1)
+
 
 SENTENCE_ENDERS = ".!?…\n"
 # Өмнөх зайг иддэг тэмдэгтүүд (үгэнд наалдана)
@@ -490,6 +677,10 @@ class Formatter:
         self.set_snippets(snippets)
         self.set_names(names)
         self._history: deque[str] = deque(maxlen=HISTORY_MEMORY)
+        # Түүхийн deque нь ЗӨВХӨН сүүлийн 40-ийг барина — «саяхан хэлсэн үг»
+        # гэдэг нь санаатай ойрын дохио. Загвар нь эсрэгээрээ бүх түүхээс
+        # сурах ёстой тул тусдаа: хоёр өөр асуултад хоёр өөр нотолгоо.
+        self.model = BigramModel()
         self.reset()
 
     def remember(self, text: str) -> None:
@@ -497,6 +688,7 @@ class Formatter:
         text = text.strip()
         if text:
             self._history.append(text)
+            self.model.learn(text)
 
     def choose(self, alternatives: list[str]) -> str:
         """Таних хувилбаруудаас өөрийн үгсийн сан, түүхэнд хамгийн нийцэхийг сонгоно.
@@ -505,7 +697,12 @@ class Formatter:
         бүгд энд байна.
         """
         return choose_alternative(
-            alternatives, self.replacements, self.snippets, self._history, self.names
+            alternatives,
+            self.replacements,
+            self.snippets,
+            self._history,
+            self.names,
+            self.model,
         )
 
     def _set_replacements(self, replacements: dict[str, str] | None) -> None:
@@ -652,7 +849,24 @@ class Formatter:
         return None
 
     # ------------------------------------------------------------------
-    def format(self, raw: str) -> tuple[str, int]:
+    def preview(self, raw: str, end_sentence: bool = False) -> tuple[str, int]:
+        """`format`-той яг ижил үр дүн, гэхдээ дотоод төлвөө хөндөхгүй.
+
+        Хувилбар сэлгэхэд хэрэгтэй: нэг таналтын БҮХ хувилбарыг ижил
+        эхлэлийн төлвөөс (том үсэг, өмнөх зай) харьцуулж бэлдэнэ.
+        """
+        saved = (self._sentence_start, self._trailing_space)
+        try:
+            return self.format(raw, end_sentence)
+        finally:
+            self._sentence_start, self._trailing_space = saved
+
+    def format(self, raw: str, end_sentence: bool = False) -> tuple[str, int]:
+        """`end_sentence` бол өгүүлбэр дууссан гэж үзэж төгсгөлд нь цэг тавина.
+
+        Дамжлага сегмент бүрийг чимээгүй завсраар (эсвэл товч суллахад) л
+        таслдаг тул сегмент болгон нь бүтэн өгүүлбэр — цэгийг тэндээс тавина.
+        """
         words = raw.split()
         if not words:
             return "", 0
@@ -665,10 +879,7 @@ class Formatter:
             return text[-1] if text else ""
 
         while index < len(words):
-            if self.voice_punctuation:
-                match = self._match_command(words, index)
-            else:
-                match = None
+            match = self._match_command(words, index) if self.voice_punctuation else None
 
             if match:
                 punct, size = match
@@ -720,6 +931,12 @@ class Formatter:
         if not text:
             return "", backspaces
 
+        # Аль хэдийн цэг таслалаар төгссөн бол дахин нэмэхгүй: «цэг» гэж
+        # дуудсан, эсвэл «шинэ мөр» гэж мөр таслуулсан байж болно.
+        if end_sentence and text[-1] not in TIGHT_LEFT:
+            text += "."
+            self._sentence_start = True
+
         if self.auto_space and not text.endswith("\n"):
             text += " "
             self._trailing_space = True
@@ -727,6 +944,25 @@ class Formatter:
             self._trailing_space = False
 
         return text, backspaces
+
+    def format_verbatim(self, raw: str) -> tuple[str, int]:
+        """Provider-ийн transcript-ийг утгын ямар ч хувиргалтгүй залгана.
+
+        Цэвэрлэгээ, толь, нэр, товчлол, дуут цэг таслал, том үсэг, автомат цэг
+        бүгдийг зориуд алгасана. `auto_space` бол хэлсэн үгийг өөрчлөхгүй,
+        дараалсан аудио сегментүүдийг салгах оруулалтын дүрэм тул хэвээр.
+        """
+
+        text = raw.strip()
+        if not text:
+            return "", 0
+        self._sentence_start = text[-1:] in SENTENCE_ENDERS
+        if self.auto_space and not text.endswith("\n"):
+            text += " "
+            self._trailing_space = True
+        else:
+            self._trailing_space = False
+        return text, 0
 
 
 def parse_replacements(raw: str) -> dict[str, str]:
@@ -745,6 +981,81 @@ def parse_replacements(raw: str) -> dict[str, str]:
 
 def format_replacements(mapping: dict[str, str]) -> str:
     return "\n".join(f"{k}={v}" for k, v in sorted(mapping.items()))
+
+
+#: Танигч руу илгээх дохионы дээд урт (тэмдэгтээр). Whisper-төрлийн API нь
+#: `prompt`-ыг ~224 токенээр хязгаарладаг ба кирилл нь токен их иддэг тул
+#: 450 тэмдэгтийг хамгаалалттай дээд хязгаар болгов.
+VOCABULARY_LIMIT = 450
+
+
+def vocabulary_hint(
+    names: dict[str, str] | None = None,
+    replacements: dict[str, str] | None = None,
+    recent: list[str] | None = None,
+    limit: int = VOCABULARY_LIMIT,
+) -> str:
+    """Толиос танигчид өгөх «хүлээгдэж байгаа үгс»-ийн мөрийг бүтээнэ.
+
+    Whisper-төрлийн үйлчилгээ `prompt` талбарт өгсөн үгсийг таних магадлалыг
+    өсгөдөг: «Чимэгсайхан» гэдэг нэрийг ЭХНЭЭСЭЭ зөв гаргах гарц. Толиор
+    дараа нь солих нь ямар ч байсан ажилладаг ч, эхнээсээ зөв ирвэл
+    хувилбар сонголт, итгэлцлийн шүүлт хоёулаа зөв ажиллана.
+
+    Урттай тул эрэмбэ нь чухал: хүний нэрс (хамгийн их алддаг) → толийн зөв
+    тал → сүүлд батлагдсан текстээс гарсан үгс. Хязгаарт хүрмэгц таслана.
+    """
+    words: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        for part in str(value).replace(",", " ").split():
+            word = part.strip(_STRIP)
+            key = word.lower()
+            if len(word) < 2 or key in seen:
+                continue
+            seen.add(key)
+            words.append(word)
+
+    for name in (names or {}):
+        add(name)
+    for correct in (replacements or {}).values():
+        add(correct)
+    for text in (recent or []):
+        add(text)
+
+    hint = ""
+    for word in words:
+        candidate = f"{hint}, {word}" if hint else word
+        if len(candidate) > limit:
+            break
+        hint = candidate
+    return hint
+
+
+def parse_actions(raw: str) -> dict[str, str]:
+    """«хэллэг=буцаах» мөрүүдээс {хэллэг: үйлдлийн нэр} толь.
+
+    Танихгүй үйлдэл бичсэн мөрийг АЛГАСНА: хадгалчихвал хэрэглэгч ажиллаж
+    байна гэж бодоод, хэлэхэд нь юу ч болохгүй байх нь илүү төөрөгдүүлнэ.
+    Монгол шошго («буцаах») ба дотоод нэр ("undo") хоёуланг хүлээж авна.
+    """
+    actions: dict[str, str] = {}
+    for phrase, value in parse_replacements(raw).items():
+        key = " ".join(phrase.lower().split())
+        name = value.strip().lower()
+        action = name if name in ACTION_LABELS else _LABEL_TO_ACTION.get(name)
+        if key and action:
+            actions[key] = action
+    return actions
+
+
+def label_actions(mapping: dict[str, str]) -> dict[str, str]:
+    """{хэллэг: үйлдэл} → {хэллэг: монгол шошго} (цонхонд харуулах)."""
+    return {
+        phrase: ACTION_LABELS.get(action, action)
+        for phrase, action in mapping.items()
+    }
 
 
 # Хувилбар сонгоход өгөх оноо. Хэрэглэгч өөрөө бичсэн зүйл хамгийн жинтэй.
@@ -806,40 +1117,94 @@ def _vocabulary_score(text: str, table: dict[str, int], longest: int) -> int:
     return total
 
 
+#: Хэлний загвар эрэмбэ солихын тулд ийм хэмжээгээр дээгүүр байх ёстой
+#: (үг тутмын дундаж лог-магадлалын зөрүү). Санаатай өндөр: жинхэнэ ялгаа нь
+#: хэдэн нат хүрдэг (хэмжсэн ~2.1), харин санамсаргүй чимээ нь 0.1-ээс доогуур.
+#: Ингэснээр «эргэлзвэл хөндөхгүй» зарчим хэвээр үлдэнэ.
+MODEL_MARGIN = 0.25
+
+
+def _leaders(candidates: list[str], table: dict[str, int], longest: int) -> list[str]:
+    """Хамгийн өндөр оноонд хүрсэн бүх хувилбарыг ЭРЭМБЭЭР нь буцаана.
+
+    Ганцыг нь биш жагсаалт буцаадгийн учир: дараагийн шатны нотолгоо зөвхөн
+    энэ шатанд тэнцсэн хувилбаруудыг л ялгах ёстой. Хүснэгт хоосон бол энэ шат
+    юу ч мэдэхгүй гэсэн үг — бүгдийг нь дамжуулна.
+    """
+    if not table:
+        return list(candidates)
+    scores = [_vocabulary_score(candidate, table, longest) for candidate in candidates]
+    best = max(scores)
+    return [c for c, score in zip(candidates, scores, strict=True) if score == best]
+
+
+def _model_leader(candidates: list[str], model) -> tuple[str, float]:
+    """Загвараар хамгийн сайныг сонгоод, тэргүүлсэн зөрүүг нь хамт буцаана.
+
+    Зөрүү нь `0.0` бол «загвар шийдсэнгүй» — дуудагч дараагийн нотолгоо руу
+    шилжинэ. Тэнцсэн үед эхнийх нь (үйлчилгээний эрэмбээр) үлдэнэ.
+    """
+    best = candidates[0]
+    baseline = model.score(best)
+    lead = 0.0
+    for candidate in candidates[1:]:
+        gain = model.score(candidate) - baseline
+        if gain > MODEL_MARGIN and gain > lead:
+            best, lead = candidate, gain
+    return best, lead
+
+
 def choose_alternative(
     alternatives: list[str],
     replacements: dict[str, str] | None = None,
     snippets: dict[str, str] | None = None,
     history: Iterable[str] = (),
     names: dict[str, str] | None = None,
+    model=None,
 ) -> str:
-    """Таних хувилбаруудаас хэрэглэгчийн үгсийн санд хамгийн сайн нийцэхийг сонгоно.
+    """Таних хувилбаруудаас хамгийн зөв нь болох магадлалтайг сонгоно.
 
     Үйлчилгээ нэг хэлсэн зүйлд хэд хэдэн хувилбар буцаадаг ч өмнө нь зөвхөн
     эхнийхийг нь авдаг байсан — үлдсэн нь хариунд ирээд хаягддаг байв. Толиндоо
     «клауд=Claude» гэж нэмсэн хүн «Claude» гэж хэлэхэд эхний хувилбар нь «клоуд»
-    гараад хоёр дахь нь «клауд» байх нь бий; тэр тохиолдолд хоёр дахийг нь
-    сонгоно. Нэмэлт хүсэлт, нэмэлт саатал, нэмэлт төлбөр үүсэхгүй.
+    гараад хоёр дахь нь «клауд» байх нь бий. Нэмэлт хүсэлт, саатал, төлбөргүй.
 
-    Зөвхөн хэрэглэгчийн ӨӨРИЙН бичсэн үг (толь, дуут товчлол) болон түүхэнд
-    өмнө нь батлагдсан үг оноо өгнө. Дуут командыг санаатай оруулаагүй: «цэг»
-    гэж сонсогдсон бүхнийг дэвшүүлбэл жинхэнэ үгийг цэг болгож гээх эрсдэлтэй.
-    Оноо тэнцвэл үйлчилгээний эрэмбэ хэвээр үлдэнэ — нотолгоогүй бол хөндөхгүй.
+    Нотолгоог ХҮЧЭЭР нь эрэмбэлж, дээд шат нь шийдвэл доод шат руу огт очихгүй:
+
+    1. **Хэрэглэгчийн өөрийн бичсэн зүйл** — толь, дуут товчлол, нэрс. Хамгийн
+       хүчтэй: хүн гараараа бичсэн байна.
+    2. **Хэлний загвар** — өмнөх бүх өгүүлбэрээс сурсан үгийн хос. «хурал
+       дээрээ» vs «хурал дээр ээ» гэх мэт бичиглэлийн зөрүүг зөвхөн энэ мэднэ.
+    3. **Түүхэнд тааралдсан үг** — загвар хараахан сураагүй байхад (эхний
+       хэдэн арван өгүүлбэр) ажиллах нөөц зам.
+
+    Загвар 2-т ЯЛГАЖ чадаагүй бол 3 руу унана: харсан боловч нотолгоо олоогүй
+    гэдэг нь мэдэхгүй гэсэн үгтэй адил. Дуут командыг аль ч шатанд оруулаагүй:
+    «цэг» гэж сонсогдсон бүхнийг дэвшүүлбэл жинхэнэ үгийг цэг болгож гээнэ.
+    Бүх шат тэнцвэл үйлчилгээний эрэмбэ хэвээр — нотолгоогүй бол хөндөхгүй.
     """
     if not alternatives:
         return ""
-    best = alternatives[0]
     if len(alternatives) < 2:
-        return best
-    table, longest = _vocabulary(replacements or {}, snippets or {}, history, names)
-    if not table:
-        return best
-    best_score = _vocabulary_score(best, table, longest)
-    for candidate in alternatives[1:]:
-        score = _vocabulary_score(candidate, table, longest)
-        if score > best_score:
-            best, best_score = candidate, score
-    return best
+        return alternatives[0]
+
+    # 1. Хэрэглэгчийн өөрийн бичсэн нотолгоо. Түүхийг ЗОРИУД оруулаагүй:
+    # түүхийн оноо нь үг тутамд нэмэгддэг тул урт хувилбарыг системтэйгээр
+    # дэвшүүлж, доод шатны илүү нарийн нотолгоог дардаг байв.
+    table, longest = _vocabulary(replacements or {}, snippets or {}, (), names)
+    tied = _leaders(alternatives, table, longest)
+    if len(tied) < 2:
+        return tied[0]
+
+    # 2. Хэлний загвар
+    if model is not None and model.ready:
+        best, lead = _model_leader(tied, model)
+        if lead > 0.0:
+            return best
+
+    # 3. Түүх
+    table, longest = _vocabulary({}, {}, history, None)
+    return _leaders(tied, table, longest)[0]
 
 
 def learn_corrections(heard: str, corrected: str, limit: int = 6) -> dict[str, str]:
@@ -856,7 +1221,7 @@ def learn_corrections(heard: str, corrected: str, limit: int = 6) -> dict[str, s
 
     learned: dict[str, str] = {}
     changes = 0
-    for was, now in zip(heard_words, fixed_words):
+    for was, now in zip(heard_words, fixed_words, strict=True):
         if was.lower() == now.lower():
             continue
         changes += 1

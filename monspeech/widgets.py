@@ -27,7 +27,7 @@ from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import icons, theme
+from . import animate, icons, theme
 
 SUPERSAMPLE = 4
 _image_cache: dict[tuple, ImageTk.PhotoImage] = {}
@@ -239,8 +239,13 @@ def wrap_to(label: tk.Label, container: tk.Widget, inset: int = 6) -> tk.Label:
 
     def resized(event) -> None:
         width = max(80, event.width - inset)
-        if int(label.cget("wraplength")) != width:
-            label.configure(wraplength=width)
+        try:
+            if int(label.cget("wraplength")) != width:
+                label.configure(wraplength=width)
+        except tk.TclError:
+            # Шошиг устсан (жагсаалт дахин зурагдсан) — эзэн виджет нь хараахан
+            # устаагүй байж болох тул хүлээгдэж байсан эвент ирдэг.
+            pass
 
     container.bind("<Configure>", resized, add="+")
     return label
@@ -317,6 +322,55 @@ def focusable(widget, activate=None, *, surface: str | None = None, paint=None) 
         widget.bind("<space>", activate)
 
 
+def descendants(widget) -> list:
+    """Виджет доторх БҮХ үр хүүхэд (гүн рүү)."""
+    found = []
+    for child in widget.winfo_children():
+        found.append(child)
+        found.extend(descendants(child))
+    return found
+
+
+def hover_group(container, paint) -> None:
+    """Виджет БА түүний бүх хүүхдийг нэг «мөр» болгож хулганы төлөв мэдэрнэ.
+
+    Tk-д хулгана хүүхэд рүү орох нь эцгээсээ ГАРСАН гэж тооцогддог тул ганц
+    `<Enter>`/`<Leave>` хосоор бүтэн мөрийг барих боломжгүй — дүрс дээгүүр
+    өнгөрөхөд л мөр «унтарна». Тиймээс гарах бүрд заагч хаана байгааг асууж,
+    мөрөөс үнэхээр гарсан эсэхийг шалгана.
+
+    Дуудахаас ӨМНӨ мөрийн бүх хүүхдийг үүсгэсэн байх ёстой.
+    """
+
+    def entered(_event=None) -> None:
+        paint(True)
+
+    def left(event) -> None:
+        widget = event.widget.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget is container:
+                return  # хүүхэд рүүгээ шилжсэн — мөр хэвээрээ
+            widget = getattr(widget, "master", None)
+        paint(False)
+
+    for widget in (container, *descendants(container)):
+        widget.bind("<Enter>", entered, add="+")
+        widget.bind("<Leave>", left, add="+")
+
+
+def refit(widget) -> None:
+    """Виджетийг агуулж буй `ScrollFrame`-д «агуулга өөрчлөгдлөө» гэж хэлнэ.
+
+    Мөр нэмэх/устгах код нь аль гүйлгэдэг талбарт сууж байгаагаа мэдэх
+    шаардлагагүй байх ёстой — эзнийг нь эндээс дээш нь явж олно.
+    """
+    while widget is not None:
+        if isinstance(widget, ScrollFrame):
+            widget.refit()
+            return
+        widget = getattr(widget, "master", None)
+
+
 def combo(parent, variable, values, command) -> ttk.Combobox:
     """Уншихаас өөр боломжгүй сонголтын цэс. Сонгомогц `command` дуудагдана."""
     box = ttk.Combobox(
@@ -337,21 +391,30 @@ def gradient_colours(count: int) -> list[str]:
         low = min(len(stops) - 1, int(pos))
         high = min(len(stops) - 1, low + 1)
         k = pos - low
-        r, g, b = (round(a + (b_ - a) * k) for a, b_ in zip(stops[low], stops[high]))
+        r, g, b = (
+            round(a + (b_ - a) * k)
+            for a, b_ in zip(stops[low], stops[high], strict=True)
+        )
         out.append(f"#{r:02x}{g:02x}{b:02x}")
     return out
 
 
 def toggle_image(
-    on: bool, hover: bool = False, bg: str = theme.PANEL, focused: bool = False
+    on: bool, hover: bool = False, bg: str = theme.PANEL, focused: bool = False,
+    progress: float | None = None,
 ) -> ImageTk.PhotoImage:
     """Унтраалгын зураг (40×22). Кэшлэнэ — Tk зургийн лавлагааг барих ёстой.
 
     Фокусын хүрээг зурган дотор зурна: Tk-ийн `highlightthickness` нь `Entry`
     дээр ажилладаг ч `Label` дээр огт зурагддаггүй (пикселээр хэмжсэн), энэ
     унтраалга нь Label юм.
+
+    `progress` (0..1) нь хөдөлгөөний завсрын байдал: бөмбөлгийн байрлал ба
+    замын өнгө хоёулаа түүгээр шугаман шилжинэ. Өгөөгүй бол `on`-оос
+    тооцно. Кэш хавдахгүйн тулд шатлуулж бөөгнөрүүлнэ.
     """
-    key = ("toggle", on, hover, bg, focused)
+    progress = (1.0 if on else 0.0) if progress is None else animate.quantise(progress)
+    key = ("toggle", hover, bg, focused, progress)
     cached = _image_cache.get(key)
     if cached is not None:
         return cached
@@ -361,10 +424,10 @@ def toggle_image(
     img = Image.new("RGB", (width * scale, height * scale), bg)
     draw = ImageDraw.Draw(img)
 
-    track = theme.TOGGLE_ON if on else theme.TOGGLE_OFF
+    track = animate.mix(theme.TOGGLE_OFF, theme.TOGGLE_ON, progress)
     if hover:
         track = _lighten(track, 0.12)
-    knob = theme.KNOB_ON if on else theme.KNOB_OFF
+    knob = animate.mix(theme.KNOB_OFF, theme.KNOB_ON, progress)
 
     # Фокустай үед мөрийг гаднаас нь хүрээлнэ — зам нь өөрөө нарийсна.
     inset_track = theme.FOCUS_WIDTH * scale if focused else 0
@@ -382,7 +445,8 @@ def toggle_image(
     )
     knob_size = 16 * scale - 2 * inset_track
     inset = 3 * scale + inset_track
-    left = (width * scale - knob_size - inset) if on else inset
+    travel = width * scale - knob_size - 2 * inset
+    left = inset + travel * progress
     draw.ellipse((left, inset, left + knob_size, inset + knob_size), fill=knob)
 
     photo = ImageTk.PhotoImage(img.resize((width, height), Image.LANCZOS))
@@ -400,6 +464,11 @@ class Toggle(tk.Label):
         self._focused = False
         self._bg = bg
         self.command = command
+        # Бөмбөлөг гулсах нь унтраалгын БАЙДАЛ солигдсоныг хамгийн шууд
+        # хэлдэг дохио: хаашаа шилжсэнийг нүд өөрөө дагана.
+        self._slide = animate.Motion(
+            self, lambda _v: self._redraw(), value=float(self._value), ms=animate.BASE
+        )
         self._redraw()
         self.bind("<Button-1>", self._clicked)
         self.bind("<Enter>", self._enter)
@@ -412,11 +481,14 @@ class Toggle(tk.Label):
 
     def set(self, value: bool) -> None:
         self._value = bool(value)
-        self._redraw()
+        self._slide.to(float(self._value))
 
     def _redraw(self) -> None:
         self.configure(
-            image=toggle_image(self._value, self._hover, self._bg, self._focused)
+            image=toggle_image(
+                self._value, self._hover, self._bg, self._focused,
+                progress=self._slide.value,
+            )
         )
 
     def _set_focus(self, focused: bool) -> None:
@@ -425,7 +497,7 @@ class Toggle(tk.Label):
 
     def _clicked(self, _event=None) -> None:
         self._value = not self._value
-        self._redraw()
+        self._slide.to(float(self._value))
         if self.command:
             self.command(self._value)
 
@@ -462,6 +534,8 @@ class ScrollFrame(tk.Frame):
         self.body = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self._bar_shown = False
+        self._viewport = (0, 0)
+        self._refit_job: str | None = None
 
         self.body.bind("<Configure>", self._resize_body)
         self.canvas.bind("<Configure>", self._resize_canvas)
@@ -488,12 +562,53 @@ class ScrollFrame(tk.Frame):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _resize_canvas(self, event) -> None:
-        # Гүйлгэгчийн зайг ҮРГЭЛЖ үлдээнэ — харагдаж байгаа эсэхээс үл хамааран.
-        # Тогтмол учраас өргөн хэлбэлзэхгүй; хэлбэлзэл нь дээр тайлбарласан
-        # гогцоог төрүүлдэг.
-        self.canvas.itemconfigure(
-            self._window, width=max(1, event.width - self.BAR_WIDTH)
-        )
+        self._viewport = (event.width, event.height)
+        self._fit()
+
+    def refit(self) -> None:
+        """Агуулга нэмэгдсэн/хасагдсаны ДАРАА дуудна.
+
+        Богино агуулгыг харагдах талбай хүртэл сунгасан үед бие нь тогтсон
+        өндөртэй болдог тул шинэ мөр нэмэгдэхэд `<Configure>` гарахгүй —
+        өссөнийг нь мэдэх цорын ганц зам бол дуудагч хэлэх. Байрлуулалт
+        дуустал `winfo_reqheight` хуучин утгаа өгөх тул idle-д хойшлуулна.
+        """
+        if self._refit_job is not None:
+            return
+        try:
+            self._refit_job = self.after_idle(self._run_refit)
+        except tk.TclError:  # цонх хаагдаж байх агшин
+            self._refit_job = None
+
+    def _run_refit(self) -> None:
+        self._refit_job = None
+        self._fit()
+
+    def _fit(self) -> None:
+        """Биеийн өргөн, өндрийг харагдах талбайд тааруулна.
+
+        Гүйлгэгчийн зайг ҮРГЭЛЖ үлдээнэ — харагдаж байгаа эсэхээс үл хамааран.
+        Тогтмол учраас өргөн хэлбэлзэхгүй; хэлбэлзэл нь дээр тайлбарласан
+        гогцоог төрүүлдэг.
+
+        Өндөр: агуулга харагдах талбайгаас БОГИНО бол биеийг сунгаж талбайг
+        дүүргэнэ («Хэрэглээ» хуудасны доод картууд цонх дүүрэн харагдахын
+        тулд). Урт бол `height=0` буюу байгалийн өндөр — тогтмол өндөр өгвөл
+        илүү хэсэг нь тайрагдаад, гүйлгэх ч боломжгүй болно.
+        """
+        width, height = self._viewport
+        if width <= 1:
+            return
+        natural = self.body.winfo_reqheight()
+        try:
+            self.canvas.itemconfigure(
+                self._window,
+                width=max(1, width - self.BAR_WIDTH),
+                height=height if natural < height else 0,
+            )
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            pass
 
     def _wheel(self, event) -> None:
         try:
@@ -558,7 +673,7 @@ class Page(ScrollFrame):
         row.pack(fill="x", padx=theme.PAGE_PAD_X, pady=(6, 6))
         tk.Frame(row, bg=theme.GRADIENT[2], width=3, height=11).pack(side="left", padx=(2, 9))
         tk.Label(
-            row, text=text.upper(), bg=theme.BG, fg=theme.DIM, font=theme.UI_TINY, anchor="w"
+            row, text=text.upper(), bg=theme.BG, fg=theme.DIM, font=theme.UI_LABEL, anchor="w"
         ).pack(side="left")
         return row
 
@@ -679,17 +794,23 @@ class NavButton(tk.Frame):
         self._active = False
         self._hover = False
         self._focused = False
+        self._badge = False
         self._photo: ImageTk.PhotoImage | None = None
         self._size = (0, 0)
+        # Хоёр тусдаа хөдөлгөөн: дэвсгэрийн өргөлт (hover БА идэвхтэй
+        # хоёуланд нь) ба идэвхтэйн зураас. Тусад нь байх нь чухал —
+        # идэвхтэй мөр дээгүүр хулгана өнгөрөхөд зураас нь хөдлөх ёсгүй.
+        self._lift = animate.Motion(self, lambda _v: self._paint(), ms=animate.FAST)
+        self._on = animate.Motion(self, lambda _v: self._paint(), ms=animate.BASE)
 
         self._back = tk.Label(self, bd=0, highlightthickness=0, bg=theme.SIDEBAR)
         self._back.place(x=0, y=0, relwidth=1, relheight=1)
         self.icon = tk.Label(self, bd=0, highlightthickness=0, bg=theme.SIDEBAR)
-        self.icon.pack(side="left", padx=(self.INDENT, 0), pady=8)
+        self.icon.pack(side="left", padx=(self.INDENT, 0), pady=theme.NAV_PAD_Y)
         self.label = tk.Label(
             self, text=text, bg=theme.SIDEBAR, fg=theme.MUTED, font=theme.UI_NAV, anchor="w"
         )
-        self.label.pack(side="left", padx=(11, 10))
+        self.label.pack(side="left", padx=(12, 10))
 
         for widget in (self, self.icon, self.label, self._back):
             widget.bind("<Button-1>", lambda _e: self.command())
@@ -708,22 +829,45 @@ class NavButton(tk.Frame):
         self._paint()
 
     def set_active(self, active: bool) -> None:
+        """Хуудас солигдлоо: зураас ургаж/агшиж, дэвсгэр нь уусна.
+
+        Цэс солигдсоныг ЭНЭ хоёр хөдөлгөөн хэлнэ — хуудсыг өөрийг нь
+        гулсуулдаггүй (учрыг `animate` модулийн тайлбараас үзнэ үү).
+        """
+        if active == self._active:
+            return
         self._active = active
+        self._on.to(1.0 if active else 0.0)
+        self._lift.to(1.0 if (active or self._hover) else 0.0)
+
+    @property
+    def badge(self) -> bool:
+        return self._badge
+
+    def set_badge(self, badge: bool) -> None:
+        """Баруун талд анхааруулгын улаан цэг (шинэчлэл гэх мэт).
+
+        Өнгөөр л биш байрлахаараа ялгагдана: идэвхтэйн зураас зүүн талд,
+        фокус бүтэн хүрээ, тэмдэг нь баруун зах — гурав огт давхцахгүй.
+        """
+        if bool(badge) == self._badge:
+            return
+        self._badge = bool(badge)
         self._paint()
 
     def set_compact(self, compact: bool) -> None:
         if compact:
             self.label.pack_forget()
         else:
-            self.label.pack(side="left", padx=(11, 10))
+            self.label.pack(side="left", padx=(12, 10))
 
     def _enter(self, _event=None) -> None:
         self._hover = True
-        self._paint()
+        self._lift.to(1.0)
 
     def _leave(self, _event=None) -> None:
         self._hover = False
-        self._paint()
+        self._lift.to(1.0 if self._active else 0.0)
 
     def _resized(self, event) -> None:
         if (event.width, event.height) == self._size:
@@ -732,14 +876,14 @@ class NavButton(tk.Frame):
         self._paint()
 
     def _paint(self) -> None:
-        if self._active:
-            bg = theme.NAV_ACTIVE
-        elif self._hover:
-            bg = theme.HOVER
-        else:
-            bg = theme.SIDEBAR
-        fg = theme.TEXT if self._active else theme.MUTED
-        self.icon.configure(bg=bg, image=icons.get(self.icon_name, fg, 17, bg))
+        # Хөдөлгөөний утгууд 0..1. Зураг кэшлэдэг булангуудад шатлуулж
+        # өгнө — тасралтгүй өнгө бүрд шинэ булан үүсгэвэл кэш хавдана.
+        lift = animate.quantise(self._lift.value)
+        on = self._on.value
+        target = theme.NAV_ACTIVE if self._active else theme.HOVER
+        bg = animate.mix(theme.SIDEBAR, target, lift)
+        fg = animate.mix(theme.MUTED, theme.TEXT, on)
+        self.icon.configure(bg=bg, image=icons.get(self.icon_name, fg, theme.NAV_ICON, bg))
         self.label.configure(bg=bg, fg=fg)
 
         width, height = self._size
@@ -748,7 +892,7 @@ class NavButton(tk.Frame):
         image = Image.new("RGB", (width, height), theme.SIDEBAR)
         draw = ImageDraw.Draw(image)
         radius = theme.RADIUS_SMALL
-        if bg != theme.SIDEBAR:
+        if lift > 0.001:
             corners = _corners(radius, bg, theme.SIDEBAR, None)
             draw.rectangle((radius, 0, width - radius - 1, height - 1), fill=bg)
             draw.rectangle((0, radius, width - 1, height - radius - 1), fill=bg)
@@ -756,10 +900,14 @@ class NavButton(tk.Frame):
             image.paste(corners[1], (width - radius, 0))
             image.paste(corners[2], (0, height - radius))
             image.paste(corners[3], (width - radius, height - radius))
-        if self._active:
+        if on > 0.001:
+            # Зураас нь ТӨВӨӨСӨӨ ургана: дээрээс доош сунгавал нүд түүнийг
+            # дагаж, цэсний бусад мөр рүү анхаарал алдагдана.
             draw = ImageDraw.Draw(image)
+            half = (height - 17) / 2 * on
+            middle = height / 2
             draw.rounded_rectangle(
-                (3, 8, 5, height - 9), radius=1, fill=theme.GRADIENT[2]
+                (3, middle - half, 5, middle + half), radius=1, fill=theme.ACCENT
             )
         if self._focused:
             # Tk нь Frame/Label дээр фокусын хүрээ зурдаггүй тул дэвсгэр
@@ -768,6 +916,11 @@ class NavButton(tk.Frame):
             ImageDraw.Draw(image).rounded_rectangle(
                 (0, 0, width - 1, height - 1),
                 radius=radius, outline=theme.FOCUS, width=theme.FOCUS_WIDTH,
+            )
+        if self._badge:
+            ImageDraw.Draw(image).ellipse(
+                (width - 17, height / 2 - 4, width - 9, height / 2 + 4),
+                fill=theme.DANGER,
             )
         self._photo = ImageTk.PhotoImage(image)
         self._back.configure(image=self._photo)
@@ -1071,6 +1224,9 @@ class PairEditor(RoundedBox):
 
     def _update_hint(self) -> None:
         self.hint.configure(text=f"{len(self._rows)} мөр")
+        # Мөр нэмэх/устгах бүрд эзэн гүйлгэдэг талбар өндрөө дахин бодно —
+        # эс бөгөөс сунгасан хуудсанд шинэ мөр тайрагдана.
+        refit(self)
 
 
 class Keycaps(tk.Frame):
@@ -1137,21 +1293,37 @@ class Link(tk.Label):
 
 
 class Button(RoundedLabel):
-    """Дугуй буланлаг хоёрдогч товч ("Солих", "Цэвэрлэх" гэх мэт)."""
+    """Дугуй буланлаг товч. Гурван зэрэглэлтэй.
+
+    * энгийн — хүрээтэй, дэвсгэргүй ("Солих", "Үзэх"). Хуудсанд олон байж болно.
+    * `primary=True` — акцентаар дүүргэсэн. Хуудас бүрд ЗӨВХӨН НЭГ байх ёстой:
+      хоёр дүүргэсэн товч зэрэгцвэл нүд аль руу нь явахаа мэдэхгүй болно.
+    * `danger=True` — хулгана хүрэхэд улаанаар анхааруулна.
+
+    Дүүргэсэн товчны бичиг нь `ON_ACCENT` — `TEXT` БИШ. Харанхуй сэдэвт
+    акцент цайвар (#9184D9) тул түүн дээр цайвар бичиг 2.7:1 болж уншигдахаа
+    больдог; `ON_ACCENT` нь 5.5:1 өгнө.
+    """
 
     def __init__(
         self, parent, text: str, command, bg: str = theme.PANEL,
-        danger: bool = False, icon: str = "",
+        danger: bool = False, icon: str = "", primary: bool = False,
     ) -> None:
         # Дүрстэй товч дээр `image` слот дүрсэнд хэрэгтэй тул дугуй дэвсгэр
         # багтахгүй — дүрсийг зөвхөн текстгүй тохиолдолд ашиглана.
+        fill = theme.ACCENT if primary else bg
         super().__init__(
-            parent, theme.RADIUS_SMALL, bg, bg, theme.BORDER,
-            text=text, fg=theme.TEXT, font=theme.UI_NAV, padx=13, pady=6, cursor="hand2",
+            parent, theme.RADIUS_SMALL, fill, bg,
+            theme.ACCENT if primary else theme.BORDER,
+            text=text, fg=theme.ON_ACCENT if primary else theme.TEXT,
+            font=theme.UI_NAV, padx=16 if primary else 13, pady=7 if primary else 6,
+            cursor="hand2",
         )
         self._danger = danger
-        self._base = bg
+        self._primary = primary
+        self._base = fill
         self._focused = False
+        self._hover = animate.Motion(self, self._hover_paint, ms=animate.FAST)
         self.bind("<Button-1>", lambda _e: command())
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
@@ -1160,10 +1332,26 @@ class Button(RoundedLabel):
     def set_text(self, text: str) -> None:
         self.restyle(text=text)
 
+    def set_primary(self, primary: bool) -> None:
+        """Зэрэглэлийг ажиллаж байхад нь солино (жишээ нь Эхлүүлэх ↔ Зогсоох)."""
+        if primary == self._primary:
+            return
+        self._primary = primary
+        self._base = theme.ACCENT if primary else self.cget("bg")
+        self.restyle(border=self._idle_border(), fg=self._idle_fg())
+        self._hover_paint(self._hover.value)
+
     def _idle_border(self) -> str:
-        return theme.FOCUS if self._focused else theme.BORDER
+        if self._focused:
+            return theme.FOCUS
+        return theme.ACCENT if self._primary else theme.BORDER
 
     def _idle_fg(self) -> str:
+        # Дүүргэсэн товчинд бичгийн өнгийг фокусын өнгө болгож БОЛОХГҮЙ —
+        # акцент дэвсгэр дээр фокусын цайвар нил ягаан бараг уусна. Тэнд
+        # фокусыг зөвхөн хүрээгээр харуулна.
+        if self._primary:
+            return theme.ON_ACCENT
         return theme.FOCUS if self._focused else theme.TEXT
 
     def _set_focus(self, focused: bool) -> None:
@@ -1174,16 +1362,34 @@ class Button(RoundedLabel):
         фокус хаана байгаа нь эргэлзээгүй.
         """
         self._focused = focused
-        self.restyle(border=self._idle_border(), fg=self._idle_fg())
+        self._hover_paint(self._hover.value)
+
+    def _hover_paint(self, amount: float) -> None:
+        """Hover-ийн 0..1 утгыг өнгө болгоно.
+
+        Дүрс нь `_rounded_cached`-аар кэшлэгддэг тул утгыг шатлуулна —
+        тасралтгүй өнгө бүрд шинэ зураг үүсгэвэл кэш хязгааргүй хавдана.
+        """
+        amount = animate.quantise(amount, 8)
+        if self._danger:
+            # Аюултай товч ХҮРЭЭГЭЭРЭЭ анхааруулна: дүүргэлт нь улаан болвол
+            # санамсаргүй дарах эрсдэл нэмэгдэнэ.
+            self.restyle(
+                border=animate.mix(self._idle_border(), theme.DANGER, amount),
+                fg=animate.mix(self._idle_fg(), theme.DANGER, amount),
+            )
+        elif self._primary:
+            self.restyle(
+                fill=animate.mix(theme.ACCENT, _lighten(theme.ACCENT, 0.12), amount)
+            )
+        else:
+            self.restyle(fill=animate.mix(self._base, theme.HOVER, amount))
 
     def _enter(self, _event=None) -> None:
-        if self._danger:
-            self.restyle(border=theme.DANGER, fg=theme.DANGER)
-        else:
-            self.restyle(fill=theme.HOVER)
+        self._hover.to(1.0)
 
     def _leave(self, _event=None) -> None:
-        self.restyle(fill=self._base, border=self._idle_border(), fg=self._idle_fg())
+        self._hover.to(0.0)
 
 
 class SearchBox(RoundedBox):

@@ -51,7 +51,7 @@ MOUTH_STEPS = 8
 
 
 def _lerp(a, b, k):
-    return tuple(round(x + (y - x) * k) for x, y in zip(a, b))
+    return tuple(round(x + (y - x) * k) for x, y in zip(a, b, strict=True))
 
 
 def _vertical_gradient(width: int, height: int, stops) -> Image.Image:

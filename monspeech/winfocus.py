@@ -262,6 +262,10 @@ class TargetWindow:
     def blocked(self) -> bool:
         return probably_blocked(self.hwnd)
 
+    def known(self) -> bool:
+        """Зорилтот цонх огт тогтоогдсон эсэх."""
+        return bool(self.hwnd)
+
     def ensure(self) -> bool:
         """Текст буулгахын өмнө зорилтот цонх идэвхтэй эсэхийг батална."""
         if not self.hwnd:

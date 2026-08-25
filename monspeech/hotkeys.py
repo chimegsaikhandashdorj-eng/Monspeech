@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
+import time
 
 from pynput import keyboard as pkeyboard
 
@@ -88,9 +89,8 @@ def describe_key(key) -> str | None:
         return f"<{key.name}>"
     vk = getattr(key, "vk", None)
     # Латин үсэг, тоог layout-аас үл хамааран виртуал кодоор нь тодорхойлно
-    if vk is not None:
-        if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
-            return chr(vk).lower()
+    if vk is not None and (0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A):
+        return chr(vk).lower()
     char = getattr(key, "char", None)
     if char and char.isprintable() and not char.isspace():
         return char.lower()
@@ -235,6 +235,38 @@ def pretty(combo: str) -> str:
     return " + ".join(parts)
 
 
+#: Хоёр дарахын хооронд өнгөрөх дээд хугацаа (секунд).
+DOUBLE_TAP_WINDOW = 0.45
+#: Нэг «дарж авах» гэж тооцох дээд хугацаа. Үүнээс удаан барьсан бол энэ нь
+#: дарж барих (push-to-talk) гэсэн үг тул хоёр дарахад тооцохгүй.
+DOUBLE_TAP_HOLD = 0.4
+
+
+class DoubleTap:
+    """Нэг товчийг хоёр хурдан дарахыг ялгаж таних.
+
+    Ctrl, Shift зэрэг товч нь өдөр бүр өөр хослолын хэсэг болж дарагддаг тул
+    дараах хоёр нөхцөлийг ЗААВАЛ шаардана:
+
+    * дарж байх зуур ӨӨР товч дарагдаагүй (Ctrl+C бол хоёр дарах биш),
+    * богино дарсан (удаан барих нь push-to-talk).
+    """
+
+    def __init__(self, name: str, combo_text: str, on_double, window: float) -> None:
+        self.name = name
+        self.text = combo_text
+        self.combo = parse_combo(combo_text)
+        self.on_double = on_double
+        self.window = window
+        self.pressed_at = 0.0
+        self.spoiled = False
+        self.last_tap = 0.0
+
+    def keys(self) -> set:
+        """Хослолын БҮХ боломжит дүрс — «өөр товч» эсэхийг үүгээр шалгана."""
+        return set().union(*self.combo) if self.combo else set()
+
+
 class HotkeyManager:
     """Хэд хэдэн товчлуурыг нэг hook дээр удирдана."""
 
@@ -249,6 +281,7 @@ class HotkeyManager:
         self._watch_stop = threading.Event()
         self._watch_thread: threading.Thread | None = None
         self._capture: dict | None = None
+        self._doubles: list[DoubleTap] = []
 
     # ------------------------------------------------------------------
     def clear(self) -> None:
@@ -260,11 +293,20 @@ class HotkeyManager:
             for binding in self._bindings:
                 binding.active = False
             self._bindings = []
+            self._doubles = []
             self._pressed.clear()
         # Хэрэглэгчийн callback-ийг түгжээнээс гадна дуудна — эс бөгөөс тэр
         # дотроосоо `bind()` дуудвал өөрөө өөрийгөө түгжинэ.
         for action in actions:
             action()
+
+    def bind_double(
+        self, name: str, combo_text: str, on_double, window: float = DOUBLE_TAP_WINDOW
+    ) -> None:
+        """Товчийг хоёр хурдан дарахад дуудагдах холбоос нэмнэ."""
+        watcher = DoubleTap(name, combo_text, on_double, window)  # түгжээнээс гадна задална
+        with self._lock:
+            self._doubles.append(watcher)
 
     def bind(self, name: str, combo_text: str, on_press=None, on_release=None) -> None:
         """Товчлуур нэмнэ. Буруу бичиглэлд `ValueError` шиднэ."""
@@ -339,6 +381,7 @@ class HotkeyManager:
                 self._capture_press(key)
                 return
             self._pressed |= key_ids(key, self._listener)
+            self._track_double_press()
             matched = self._matched()
             actions = []
             for binding in matched:
@@ -368,7 +411,7 @@ class HotkeyManager:
                 finished = self._capture_release()
             else:
                 self._pressed -= key_ids(key, self._listener)
-                actions = self._deactivate_unheld()
+                actions = self._track_double_release() + self._deactivate_unheld()
         if finished:
             on_done, combo = finished
             if on_done:
@@ -376,6 +419,46 @@ class HotkeyManager:
             return
         for action in actions:
             action()
+
+    def _track_double_press(self) -> None:
+        """Дарагдсан товчийг хоёр дарах хэмжүүрт бүртгэнэ (түгжээ дотор)."""
+        now = time.monotonic()
+        for watcher in self._doubles:
+            keys = watcher.keys()
+            if not combo_pressed(watcher.combo, self._pressed):
+                # Хослол нь бүрдээгүй атлаа өөр товч дарагдсан — хэрэв энэ
+                # хооронд хүлээгдэж байсан бол тэр нь хослолын хэсэг байжээ.
+                if watcher.pressed_at:
+                    watcher.spoiled = True
+                continue
+            if self._pressed - keys:
+                watcher.spoiled = True  # Ctrl+C гэх мэт — хоёр дарах биш
+                continue
+            if not watcher.pressed_at:
+                watcher.pressed_at = now
+                watcher.spoiled = False
+
+    def _track_double_release(self) -> list:
+        """Товч суллагдлаа — хоёр дахь дарах мөн эсэхийг шийднэ (түгжээ дотор)."""
+        now = time.monotonic()
+        actions = []
+        for watcher in self._doubles:
+            if not watcher.pressed_at or combo_pressed(watcher.combo, self._pressed):
+                continue
+            held = now - watcher.pressed_at
+            spoiled = watcher.spoiled
+            watcher.pressed_at = 0.0
+            watcher.spoiled = False
+            if spoiled or held > DOUBLE_TAP_HOLD:
+                watcher.last_tap = 0.0  # гинжийг тасална
+                continue
+            if watcher.last_tap and now - watcher.last_tap <= watcher.window:
+                watcher.last_tap = 0.0
+                if watcher.on_double:
+                    actions.append(watcher.on_double)
+                continue
+            watcher.last_tap = now
+        return actions
 
     def _deactivate_unheld(self) -> list:
         """Хослол нь задарсан холбоосуудыг унтраана (түгжээ дотор дуудна)."""

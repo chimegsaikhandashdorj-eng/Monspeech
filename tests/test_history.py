@@ -53,6 +53,19 @@ for index in range(5):
 check("хязгаар", limited.depth, 3)
 check("хамгийн сүүлийнх", limited.take_last()[0], "4")
 
+# `last()` нь харна, аваад явахгүй — «давт», «хуулж ав» хоёрт хэрэгтэй
+peek = InsertionHistory()
+peek.record("сайн байна ")
+check("харах", peek.last(), "сайн байна ")
+check("харсан ч үлдсэн", peek.depth, 1)
+check("харсны дараа буцааж болно", peek.take_last(), ("сайн байна ", 11))
+check("хоосон бол None", peek.last(), None)
+
+stale = InsertionHistory(max_age=60.0)
+stale.record("хуучин", when=0.0)
+check("хуучирсныг харуулахгүй", stale.last(now=120.0), None)
+check("харахад цэвэрлэгддэггүй", stale.depth, 1)
+
 check("цэвэрлэх", (InsertionHistory().record("х") or True, True), (True, True))
 
 print()

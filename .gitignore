@@ -18,3 +18,7 @@ skills-lock.json
 .vscode/
 .idea/
 *.swp
+
+# Хувийн benchmark дуу ба зөв transcript; зөвхөн жишээ manifest-ийг хадгална.
+benchmarks/audio/
+benchmarks/manifest.jsonl

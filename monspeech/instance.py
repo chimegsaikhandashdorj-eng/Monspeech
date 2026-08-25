@@ -126,9 +126,8 @@ class ShowListener:
             handle = self._handle
             if handle is None:
                 return
-            if dll.WaitForSingleObject(handle, SHOW_POLL_MS) == WAIT_OBJECT_0:
-                if self._running:
-                    self._on_signal()
+            if dll.WaitForSingleObject(handle, SHOW_POLL_MS) == WAIT_OBJECT_0 and self._running:
+                self._on_signal()
 
     def stop(self) -> None:
         self._running = False

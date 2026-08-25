@@ -41,6 +41,7 @@ class FakeApp:
     _match_window = MonspeechApp._match_window
     _window_lang = MonspeechApp._window_lang
     _window_clean = MonspeechApp._window_clean
+    _window_verbatim = MonspeechApp._window_verbatim
     _insert_mode = MonspeechApp._insert_mode
     _remember_window_in = MonspeechApp._remember_window_in
     remember_no_clean_app = MonspeechApp.remember_no_clean_app
@@ -53,6 +54,7 @@ class FakeApp:
                 "lang": "mn-MN",
                 "lang_apps": {},
                 "clean_speech": True,
+                "verbatim_mode": False,
                 "no_clean_apps": [],
                 "type_mode": False,
                 "type_mode_apps": [],
@@ -96,6 +98,12 @@ check(
     False,
 )
 check("унтраалттай бол бүх цонхонд", app("Notepad", clean_speech=False)._window_clean(), False)
+check("глобал үгчлэн", app("Notepad", verbatim_mode=True)._window_verbatim(), True)
+check(
+    "цонхны үгчлэн",
+    app("Тэмдэглэл - Obsidian", no_clean_apps=["Obsidian"])._window_verbatim(),
+    True,
+)
 
 # --- Хэл: хүснэгтээс утга ---
 check("тохирох цонхны хэл", app("app.py - Code", lang_apps={"Code": "en-US"})._window_lang(), "en-US")
