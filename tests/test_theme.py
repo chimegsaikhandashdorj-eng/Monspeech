@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech import theme
 
@@ -48,6 +50,16 @@ def at_least(label, fg, bg, need):
     print(f"{'ok  ' if ok else 'FAIL'} {label} -> {ratio:.2f}:1")
 
 
+# Хамгийн эхэнд: сэдвүүд ЯГ ижил түлхүүртэй юу. `theme.apply()` нь
+# `globals().update(palette)` хийдэг тул нэг сэдэвт дутсан түлхүүр устдаггүй —
+# өмнөх сэдвийн утга үлдэж, хоёр палитр холилдоно. Энэ нь нүдэнд шууд
+# харагдахгүй, зөвхөн сэдэв сэлгэсний дараа гарч ирдэг алдаа.
+_keys = {name: set(palette) for name, palette in theme.PALETTES.items()}
+_base = sorted(_keys)[0]
+for _name in sorted(_keys):
+    missing = _keys[_base] ^ _keys[_name]
+    check(f"{_name} сэдвийн түлхүүрүүд бүрэн", sorted(missing), [])
+
 # Сэдэв бүрийг ТУСАД нь шалгана — гэрэлтэй сэдэв нь харанхуйгаас зүгээр
 # эргүүлсэн зүйл биш тул өөрийн гэсэн харьцаатай.
 for theme_name in sorted(theme.PALETTES):
@@ -79,9 +91,30 @@ for theme_name in sorted(theme.PALETTES):
         at_least(f"WARN / {name}", theme.WARN, SURFACES[name], 4.5)
         at_least(f"DANGER / {name}", theme.DANGER, SURFACES[name], 4.5)
 
+    # `ACCENT` нь ДҮҮРГЭЛТ. Түүн дээрх бичиг нь `TEXT` биш `ON_ACCENT` —
+    # харанхуй сэдэвт акцент цайвар тул `TEXT` тавьбал 2.7:1 болно.
+    at_least("ON_ACCENT / ACCENT", theme.ON_ACCENT, theme.ACCENT, 4.5)
+
+    # Төлөвийн зөөлөн дэвсгэр бүр өөрийн тод өнгийг уншигдахуйц барих ёстой
+    for name in ("OK", "WARN", "DANGER"):
+        at_least(
+            f"{name} / {name}_SOFT",
+            getattr(theme, name), getattr(theme, f"{name}_SOFT"), 4.5,
+        )
+
     # Идэвхтэй цэс
     at_least("TEXT / NAV_ACTIVE", theme.TEXT, theme.NAV_ACTIVE, 4.5)
     at_least("MUTED / SIDEBAR", theme.MUTED, theme.SIDEBAR, 4.5)
+
+    # `BORDER_STRONG` нь `BORDER`-оос нүдэнд ялгарах ёстой — эс бөгөөс хоёр
+    # шатны хүрээ гэж ярих утгагүй.
+    ok = contrast(theme.BORDER_STRONG, theme.BORDER) >= 1.2
+    if not ok:
+        fails.append("BORDER_STRONG ба BORDER хоёр хэт ойрхон")
+    print(
+        f"{'ok  ' if ok else 'FAIL'} BORDER_STRONG ялгарна -> "
+        f"{contrast(theme.BORDER_STRONG, theme.BORDER):.2f}:1"
+    )
 
     # Фокусын хүрээ нь текст биш — удирдлагын тэмдэг тул 3:1
     for name, surface in SURFACES.items():

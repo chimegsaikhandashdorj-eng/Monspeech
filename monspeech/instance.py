@@ -24,12 +24,29 @@ ASFW_ANY = -1  # фокус авах эрхийг дурын процесст ө
 SHOW_POLL_MS = 400  # дохио хүлээхдээ ийм алхмаар сэрнэ (гарахад л хэрэгтэй)
 
 
+_kernel32_le = None
+
+
+def _kernel32_lasterror():
+    """`GetLastError`-ыг НАЙДВАРТАЙ уншиж болох kernel32.
+
+    `ctypes.windll.kernel32.GetLastError()` нь өөрөө бас нэг Win32 дуудлага —
+    ctypes хооронд нь өөр дуудлага хийвэл алдааны код аль хэдийн дарагдсан
+    байдаг. Python-ы баримт бичиг үүнийг шууд анхааруулж, `use_last_error`-ыг
+    зөвлөдөг: тэгвэл ctypes дуудлага бүрийн дараа кодыг өөртөө хадгална.
+    """
+    global _kernel32_le
+    if _kernel32_le is None:
+        _kernel32_le = ctypes.WinDLL("kernel32", use_last_error=True)
+    return _kernel32_le
+
+
 def already_running() -> bool:
     """Хоёр хуулбар зэрэг ажиллавал товчлуур давхар ажиллана."""
     try:
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _kernel32_lasterror()
         kernel32.CreateMutexW(None, False, MUTEX_NAME)
-        return kernel32.GetLastError() == ERROR_ALREADY_EXISTS
+        return ctypes.get_last_error() == ERROR_ALREADY_EXISTS
     except OSError:
         return False
 
@@ -109,9 +126,8 @@ class ShowListener:
             handle = self._handle
             if handle is None:
                 return
-            if dll.WaitForSingleObject(handle, SHOW_POLL_MS) == WAIT_OBJECT_0:
-                if self._running:
-                    self._on_signal()
+            if dll.WaitForSingleObject(handle, SHOW_POLL_MS) == WAIT_OBJECT_0 and self._running:
+                self._on_signal()
 
     def stop(self) -> None:
         self._running = False

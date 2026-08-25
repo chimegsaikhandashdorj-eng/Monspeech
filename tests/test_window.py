@@ -11,11 +11,21 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
 
+
+import datetime
 import tkinter as tk
 
-from monspeech import config as config_module
+from monspeech import animate, config as config_module, mics, theme
 from monspeech.config import Config
+from monspeech.samples import HardSampleStore
+
+# Хөдөлгөөнийг унтраана. Энэ тест нь өнгө, бүтэц зөв эсэхийг шалгадаг ба
+# шилжилт нь ЭХЭЛСЭН агшинд утга нь хуучин байдаг — тэр нь хөдөлгөөний зөв
+# зан төлөв, гэхдээ энд шалгаж буй зүйл биш. Хөдөлгөөнөө өөрийг нь
+# `test_animate.py` тусад нь шалгана.
+animate.enabled = False
 
 fails = []
 
@@ -41,6 +51,17 @@ class Stats:
     data = {"words": 0, "seconds_spoken": 0.0}
     today_words = 0
     average_ms = 0.0
+
+    def __init__(self):
+        self.usages = {
+            "openai": {"seconds": 900.0, "requests": 12, "today": 300.0, "month": 900.0},
+            "google": {"seconds": 60.0, "requests": 3, "today": 60.0, "month": 60.0},
+        }
+
+    def usage(self, provider):
+        return self.usages.get(
+            provider, {"seconds": 0.0, "requests": 0, "today": 0.0, "month": 0.0}
+        )
 
 
 class Transcripts:
@@ -68,16 +89,26 @@ class FakeApp:
         self.cfg["snippets"] = {"миний хаяг": "УБ"}
         self.stats = Stats()
         self.transcripts = Transcripts()
+        self.samples = HardSampleStore(directory=Path(tempfile.mkdtemp()))
         self.saved_replacements = None
         self.saved_snippets = None
         self.tuning = {}
+        self.marker = "Notepad"
+        self.repasted = None
+        self.copied = None
 
     @staticmethod
-    def list_microphones():
-        return ["Системийн үндсэн", "Микрофон (Realtek)"], [-1, 3]
+    def microphones():
+        return [mics.SYSTEM, mics.Mic(3, "Микрофон (Realtek)")]
 
     def toggle(self):
         pass
+
+    def repaste(self, text):
+        self.repasted = text
+
+    def copy_text(self, text):
+        self.copied = text
 
     def open_log(self):
         pass
@@ -85,14 +116,17 @@ class FakeApp:
     def remember_type_mode_app(self):
         return "«Notepad» цонхонд одооноос шууд бичнэ."
 
+    def remember_no_clean_app(self):
+        return "«Obsidian» цонхонд одооноос үгчлэн бичнэ."
+
     def on_lang_changed(self, code):
         self.cfg["lang"] = code
 
     def on_alt_lang_changed(self, code):
         self.cfg["lang_alt"] = code
 
-    def on_mic_changed(self, index):
-        self.cfg["mic_index"] = index
+    def on_mic_changed(self, mic):
+        mic.save_to(self.cfg)
 
     def on_theme_changed(self, code):
         self.cfg["theme"] = code
@@ -111,17 +145,60 @@ class FakeApp:
         self.saved_snippets = raw
         return raw.count("=")
 
+    def on_names_changed(self, raw):
+        self.saved_names = raw
+        return raw.count("=")
+
     def on_lang_apps_changed(self, raw):
         from monspeech.textproc import parse_replacements
 
         self.cfg["lang_apps"] = parse_replacements(raw)
         return len(self.cfg["lang_apps"])
 
+    def on_actions_changed(self, raw):
+        from monspeech.textproc import parse_actions
+
+        self.cfg["actions"] = parse_actions(raw)
+        return len(self.cfg["actions"])
+
+    def on_transcript_language_changed(self, entry, language):
+        entry["lang"] = language
+        entry["language_corrected"] = True
+        return f"Хэл батлагдлаа: {language}."
+
+    # --- Цонхны дүрэм: жинхэнэ `MonspeechApp`-ийн методуудыг зээлнэ.
+    # Импортыг дуудлагын үед хийнэ — Tk байхгүй орчинд энэ файл эхэндээ
+    # `monspeech.app`-ыг татах ёсгүй (тэр нь цонх, tray-г дагуулж ирнэ).
+    def _rules_api(self, name, *args):
+        from monspeech.app import MonspeechApp
+
+        self.RULE_LISTS = MonspeechApp.RULE_LISTS
+        return getattr(MonspeechApp, name)(self, *args)
+
+    def current_window_marker(self):
+        return self.marker
+
+    def window_rules(self):
+        return self._rules_api("window_rules")
+
+    def window_rule(self, marker):
+        return self._rules_api("window_rule", marker)
+
+    def set_window_rule(self, marker, kind, value):
+        return self._rules_api("set_window_rule", marker, kind, value)
+
+    def remove_window_rule(self, marker):
+        return self._rules_api("remove_window_rule", marker)
+
     def open_releases(self):
         self.opened_releases = True
 
     def copy_diagnostics(self):
         return "Мэдээллийг хууллаа"
+
+    def clear_samples(self):
+        self.samples.clear()
+        return "Жишээнүүдийг устгалаа."
 
     def finish_onboarding(self):
         self.cfg["onboarded"] = True
@@ -135,7 +212,7 @@ try:
     root = tk.Tk()
 except tk.TclError as exc:  # дэлгэцгүй орчин
     print(f"алгаслаа (Tk нээгдсэнгүй: {exc})")
-    raise SystemExit(0)
+    raise SystemExit(0) from None
 
 # Дэлгэцээс гадуур байрлуулна — `withdraw()` биш. Шалтгаан: withdraw хийсэн
 # цонхны хүүхдүүд map хийгддэггүй тул `event_generate` тэдэнд хүрэхгүй, товчлуурын
@@ -146,67 +223,108 @@ try:
 except tk.TclError:
     pass  # энэ платформ дэмжихгүй бол дэлгэцээс гадуур байрлал хангалттай
 
-from monspeech.window import NAV, ControlWindow, unknown_language_codes  # noqa: E402 - Tk шалгасны дараа
+from monspeech.window import (  # noqa: E402 - Tk шалгасны дараа
+    NAV,
+    SETTINGS_NAV,
+    ControlWindow,
+    unknown_language_codes,
+)
 
 app = FakeApp()
 ui = ControlWindow(root, app)
 root.update()
 
-# --- Бүтэц: 7 цэс, 7 хуудас ---
-check("цэсний тоо", len(ui.nav), 7)
-check("хуудасны тоо", len(ui.pages), 7)
+# --- Бүтэц: 6 үндсэн цэс, 6 хуудас; Тохиргоо тусдаа цонх ---
+check("цэсний тоо", len(ui.nav), 6)
+check("хуудасны тоо", len(ui.pages), 6)
+check("тохиргооны хуудасны тоо", len(ui.settings.pages), 4)
 check("эхний хуудас идэвхтэй", ui.page_index, 0)
 check("зөвхөн нэг хуудас харагдана", sum(shown(p) for p in ui.pages), 1)
+check("тохиргооны цонх эхэндээ нуугдсан", str(ui.settings.win.state()), "withdrawn")
+check("лого sidebar-ын толгойд", shown(ui.logo), True)
+check("хайлтын талбар хассан", not hasattr(ui, "search"), True)
 
 # --- Цэс сонгох ---
-ui.select(3)
+ui.select(1)
 root.update()
-check("сонгосон хуудас", ui.pages[3].title, "Товчлуур")
-check("сонгосон хуудас харагдав", shown(ui.pages[3]), True)
+check("сонгосон хуудас", ui.pages[1].title, "Толь")
+check("сонгосон хуудас харагдав", shown(ui.pages[1]), True)
 check("өмнөх хуудас нуугдав", shown(ui.pages[0]), False)
 
-# --- Ctrl+1..7 ---
+# --- Тохиргооны цонх нээх/хаах ---
+ui.open_settings(2)
+root.update()
+check("тохиргооны цонх нээгдэв", str(ui.settings.win.state()), "normal")
+check("тохиргооны хэсэг сонгогдов", ui.settings.pages[ui.settings.page_index].title, "Товчлуур")
+check("тохиргоонд зөвхөн нэг хэсэг харагдана", sum(shown(p) for p in ui.settings.pages), 1)
+ui.settings.select(1)
+check("хэсэг сэлгэв", ui.settings.pages[ui.settings.page_index].title, "Бичилт")
+ui.settings.hide()
+check("тохиргооны цонх хаагдав", str(ui.settings.win.state()), "withdrawn")
+
+# --- Хүрээгүй popover: гадна товшиход хаагдана ---
+check("системийн гарчиггүй", int(ui.settings.win.overrideredirect()), 1)
+# Товч дээрх ЖИНХЭНЭ товшилтын дарааллыг event_generate-аар дуурайна:
+# виджетийн холбоос (нээх) → bind_all (хаагч) ийм дарааллаар ажилладаг.
+ui.settings_button.event_generate("<Button-1>")
+root.update()
+check("нээгдэв", str(ui.settings.win.state()), "normal")
+check("өнцөг бөөрөнхийлсөн", ui.settings._region_size != (0, 0), True)
+sidebar_labels = [
+    w.cget("text") for w in ui.settings.sidebar.winfo_children()
+    if isinstance(w, tk.Label)
+]
+check("хувилбарын бичиг хассан", all("Monspeech" not in t for t in sidebar_labels), True)
+check("хэсгийн гарчиг үлдсэн", "ТОХИРГОО" in sidebar_labels, True)
+# Үндсэн цонхны виджет дээрх товшилт — bind_all-аар дамжин нуугдана
+ui.orb.event_generate("<Button-1>")
+root.update()
+check("гадна товшиход шууд хаагдав", str(ui.settings.win.state()), "withdrawn")
+# Доторх товшилт цонхыг хаахгүй
+ui.settings_button.event_generate("<Button-1>")
+root.update()
+ui.settings.nav[0].event_generate("<Button-1>")
+root.update()
+check("дотор товшиход үлдэнэ", str(ui.settings.win.state()), "normal")
+# Тохиргоо товч дахин дарахад хаагдана (toggle)
+ui.settings_button.event_generate("<Button-1>")
+root.update()
+check("товчоор нь хаагдав (toggle)", str(ui.settings.win.state()), "withdrawn")
+
+# --- Ctrl+1..6 ---
 # Синтетик товчлуурын эвент ашиглахгүй: тэр нь OS-ийн фокустай виджет рүү
 # очдог тул дэлгэцээс гадуурх тунгалаг цонхонд найдваргүй (хэмжсэн: багц
 # дотор 8 удаагийн 2-т унасан). Холбоос холбогдсон эсэх, тэр нь зөв хуудас
 # сонгодог эсэх хоёр л бидний хяналтад.
-for number in range(1, 8):
+for number in range(1, len(NAV) + 1):
     if not root.bind(f"<Control-Key-{number}>"):
         fails.append(f"Ctrl+{number} холбогдоогүй")
-check("Ctrl+1..7 бүгд холбогдсон", len(fails), 0)
-ui.select(4)
+check("Ctrl+1..6 бүгд холбогдсон", len(fails), 0)
+ui.select(1)
 root.update()
-check("Ctrl+5-ын байрлал → Толь", ui.pages[ui.page_index].title, "Толь")
-
-# --- Хайлт нь навигацийн туслах ---
-ui.search_var.set("микрофон")
-root.update()
-check("хайлтын самбар гарсан", shown(ui.results), True)
-found = [w for w in ui.results.inner.winfo_children()]
-check("илэрц олдсон", len(found) > 0, True)
-ui._go_from_search(1)
-root.update()
-check("илэрц дээр дарахад цэс солигдов", ui.pages[ui.page_index].title, "Яриа")
-check("хайлт цэвэрлэгдэв", ui.search_var.get(), "")
-check("хайлтын самбар хаагдав", shown(ui.results), False)
-
-ui.search_var.set("ийм тохиргоо байхгүй")
-root.update()
-check("илэрцгүй мэдэгдэл", len(ui.results.inner.winfo_children()), 1)
-ui.search_var.set("")
-root.update()
+check("Ctrl+2-ын байрлал → Толь", ui.pages[ui.page_index].title, "Толь")
 
 # --- Чагтууд бүгд бүртгэгдсэн ---
-check("чагтын тоо", len(ui.toggles), 13)
+check("чагтын тоо", len(ui.toggles), 23)
+check("толийн дохионы чагт", "vocabulary_boost" in ui.toggles, True)
+check("хоёр дарахын чагт", "double_tap_enabled" in ui.toggles, True)
+check("чимээ дарах чагт", "noise_suppression" in ui.toggles, True)
+check("ярианы илрүүлэгчийн чагт", "vad" in ui.toggles, True)
+check("хэцүү жишээний чагт", "save_hard_audio" in ui.toggles, True)
+check("унтраалттай үед тэмдэглэнэ", ui.samples_var.get(), "Унтраалттай")
+check("автомат цэгийн чагт", "auto_period" in ui.toggles, True)
 check("хэл сэжиглэх чагт", "detect_language" in ui.toggles, True)
+check("нарийвчлалын чагт", "language_accuracy_mode" in ui.toggles, True)
+check("үгчлэн чагт", "verbatim_mode" in ui.toggles, True)
 check("шинэчлэл шалгах чагт", "check_updates" in ui.toggles, True)
 check("Windows-тай хамт эхлүүлэх чагт", "start_with_windows" in ui.toggles, True)
 check("долгион чагт", "wave_overlay" in ui.toggles, True)
 check("чигчлүүр цэвэрлэх чагт", "clean_speech" in ui.toggles, True)
 
 # --- Гулсуурууд (өмнө нь combobox байсан) ---
-check("гулсуурын тоо", len(ui.sliders), 4)
+check("гулсуурын тоо", len(ui.sliders), 6)
 check("дээд хугацааны гулсуур", "max_recording_seconds" in ui.sliders, True)
+check("урьдчилсан буферийн гулсуур", "preroll_seconds" in ui.sliders, True)
 ui.sliders["silence_hold"].set(0.9)
 ui.sliders["silence_hold"]._settled()
 check("гулсуур тохиргоог дамжуулсан", round(app.tuning["silence_hold"], 2), 0.9)
@@ -215,10 +333,14 @@ ui.sliders["min_confidence"].set(-5)
 check("хүрээнээс гаралгүй хумигдсан", ui.sliders["min_confidence"].value, 0.0)
 
 # --- Товчлуур ---
-check("товчлуурын мөрүүд", sorted(ui.keycaps), ["hotkey", "ptt_key", "ptt_key_alt", "undo_key"])
+check(
+    "товчлуурын мөрүүд",
+    sorted(ui.keycaps),
+    ["command_key", "hotkey", "ptt_key", "ptt_key_alt", "undo_key", "variant_key"],
+)
 
 # --- Толь: мөр мөрөөр засварлах ---
-ui.select(4)
+ui.select(1)
 root.update()
 check("толийн мөр ачаалагдсан", len(ui.pairs._rows), 1)
 check("толийн утга", ui.pairs.mapping(), {"клауд": "Claude"})
@@ -228,8 +350,21 @@ check("мөр нэмэгдсэн", ui.pairs.mapping()["монспич"], "Monspe
 ui._save_dictionary(ui.pairs.mapping())
 check("толь хадгалагдсан", "монспич=Monspeech" in (app.saved_replacements or ""), True)
 
-# --- Толины гурав дахь таб: аппаар ялгах хэл ---
-ui._dictionary_tab(2)
+# --- Нэрсийн таб ---
+ui._dictionary_tab(1)
+root.update()
+check(
+    "нэрсийн баганын шошго",
+    (ui.pairs.head_a.cget("text"), ui.pairs.head_b.cget("text")),
+    ("НЭР", "СОНСОГДДОГ ХУВИЛБАР (ЗААВАЛ БИШ)"),
+)
+ui.pairs.add_row("Чимэгсайхан", "чимээ сайхан")
+root.update()
+ui._save_dictionary(ui.pairs.mapping())
+check("нэр хадгалагдсан", "Чимэгсайхан=чимээ сайхан" in (app.saved_names or ""), True)
+
+# --- Толины сүүлийн таб: аппаар ялгах хэл ---
+ui._dictionary_tab(3)
 root.update()
 check("аппын хэлний таб хоосон", ui.pairs.mapping(), {})
 check(
@@ -250,7 +385,91 @@ check(
 )
 check("бүгд танигдвал хоосон", unknown_language_codes({"Code": "en-US"}), [])
 
+# --- Дуут үйлдлийн таб ---
+ui._dictionary_tab(4)
+root.update()
+check(
+    "үйлдлийн баганын шошго",
+    tuple(ui.pairs._labels),
+    ("Хэлэх үг", "Юу хийх"),
+)
+ui.pairs.add_row("цуцал", "буцаах")
+ui.pairs.add_row("нэрээ хэл", "жиншгүй үйлдэл")
+root.update()
+ui._save_dictionary(ui.pairs.mapping())
+check("үйлдэл хадгалагдсан", app.cfg["actions"], {"цуцал": "undo"})
+
+# Дискэн дээрх дотоод нэрийг цонхонд монголоор нь харуулна
+ui._dictionary_tab(4)
+root.update()
+check("шошготой харагдана", ui.pairs.mapping(), {"цуцал": "буцаах"})
+
 ui._dictionary_tab(0)
+root.update()
+
+# --- Хэрэглээ ба зардал ---
+app.cfg["stt_provider"] = "openai"
+app.cfg["stt_cost_per_minute"] = 0.006
+ui.refresh_stats()
+check(
+    "зардал ойролцоогоор гарна",
+    ui.usage_var.get(),
+    "өнөөдөр 5.0 мин · энэ сар 15.0 мин · нийт 12 хүсэлт · ~$0.09",
+)
+
+# Google үнэгүй тул зардал харуулахгүй
+app.cfg["stt_provider"] = "google"
+ui.refresh_stats()
+check("үнэгүй танигчид зардал алга", "$" in ui.usage_var.get(), False)
+
+# Хараахан хэрэглээгүй танигч
+app.cfg["stt_provider"] = "deepgram"
+ui.refresh_stats()
+check("хэрэглээгүй бол хэлнэ", ui.usage_var.get(), "Хараахан хүсэлт явуулаагүй")
+app.cfg["stt_provider"] = "google"
+
+# --- Хөрвүүлэх: тусдаа хуудас ---
+ui.select(3)
+root.update()
+check("хөрвүүлэх хуудас нэр", ui.pages[3].title, "Хөрвүүлэх")
+check("файлын явцын мөр бэлдсэн", isinstance(ui.file_progress, tk.StringVar), True)
+
+# --- Аппууд: цонх бүрийн дүрэм ---
+# Өмнөх тестүүд «Visual Studio Code»-ыг Толь дээрээс нэмсэн — цэвэр эхэлнэ.
+app.cfg["lang_apps"] = {}
+ui.select(5)
+root.update()
+check("аппын хуудас нэрлэгдсэн", ui.pages[5].title, "Аппууд")
+check("сүүлийн цонх харагдав", ui.app_marker_var.get(), "Notepad")
+check("эхэндээ дүрэмгүй", ui.app_lang_var.get(), "Үндсэн")
+
+# Хэл сонгоход `lang_apps` руу очно
+ui.app_lang_var.set("English (US)")
+ui._app_lang_changed()
+check("хэлний дүрэм хадгалагдав", app.cfg["lang_apps"], {"Notepad": "en-US"})
+
+# Чагтууд нь жагсаалтуудыг удирдана
+ui._app_rule_changed("type_mode", True)
+check("шууд бичих жагсаалт", app.cfg["type_mode_apps"], ["Notepad"])
+ui._app_rule_changed("no_clean", True)
+check("цэвэрлэхгүй жагсаалт", app.cfg["no_clean_apps"], ["Notepad"])
+
+# Гурван тохиргоо нэг мөр болж нэгдэнэ
+rules = app.window_rules()
+check("нэг апп нэг мөр", len(rules), 1)
+check(
+    "дүрмүүд нэгтгэгдэв",
+    (rules[0]["marker"], rules[0]["lang"], rules[0]["type_mode"], rules[0]["no_clean"]),
+    ("Notepad", "en-US", True, True),
+)
+
+# Устгахад гурвуулаа арилна
+ui._remove_rule("Notepad")
+check("бүх дүрэм устав", app.window_rules(), [])
+check("хэл ч устав", app.cfg["lang_apps"], {})
+check("жагсаалтууд ч цэвэрлэгдэв", app.cfg["type_mode_apps"] + app.cfg["no_clean_apps"], [])
+
+ui.select(0)
 root.update()
 
 # --- Хоёр дахь хэл цонхноос сонгогдоно ---
@@ -276,6 +495,10 @@ root.update()
 check("түүхийн хайлт", ui.history_box.size(), 1)
 ui.history_query.set("")
 root.update()
+ui.history_box.selection_set(0)
+ui._mark_language("en-US")
+check("түүхээс хэл батална", ui._history_rows[0]["lang"], "en-US")
+check("хэл зассан тэмдэг", ui._history_rows[0]["language_corrected"], True)
 
 # --- Төлөв: робот ба тоон самбар ---
 ui.select(0)
@@ -284,23 +507,101 @@ ui.set_state("listening", "Сонсож байна", "Тавихад орно")
 check("роботын төлөв", ui.orb.mode, "listening")
 check("sidebar-ын төлөв", ui.state_var.get(), "Сонсож байна")
 check("товчны бичиг", ui.action_button.cget("text"), "Зогсоох")
+
+# Сонсож байх үед капсул өөрөө акцентаар дүрэлзэх ба товч хүрээт хэлбэртээ
+# буцна — хоёр тод юм зэрэгцвэл аль нь ч анхаарал татахгүй.
+check("сонсоход капсул дүүрнэ", ui.pill.fill, theme.ACCENT)
+check("капсул дээрх бичиг уншигдана", ui.pill_label.cget("fg"), theme.ON_ACCENT)
+check("сонсоход товч хүрээт болно", ui.action_button._primary, False)
+
 ui.set_state("ready", "Бэлэн", "")
 check("бэлэн болоход робот амарна", ui.orb.mode, "idle")
 check("тайлбар анхны утгадаа буцсан", ui.hint_var.get(), ui.default_hint)
+check("бэлэн капсул ногооролно", ui.pill.fill, theme.OK_SOFT)
+check("бэлэн бичиг ногоон", ui.pill_label.cget("fg"), theme.OK)
+check("бэлэн үед товч дүүрнэ", ui.action_button._primary, True)
+check("товчны бичиг буцав", ui.action_button.cget("text"), "Эхлүүлэх")
+
+ui.set_state("error", "Алдаа", "")
+check("алдааны капсул", ui.pill.fill, theme.DANGER_SOFT)
+check("капсулын цэг бичигтэйгээ нэг өнгөтэй", ui.pill_dot.cget("bg"), theme.DANGER_SOFT)
+ui.set_state("ready", "Бэлэн", "")
+
+# Хэлний чипийг акцентаар ДҮҮРГЭХГҮЙ: энэ сэдвийн акцент цайвар тул түүн дээр
+# `TEXT` тавьбал 2.7:1 болно. Сонголтыг хүрээгээр л ялгана.
+active = ui.lang_chips[app.cfg["lang"]]
+inactive = next(c for k, c in ui.lang_chips.items() if k != app.cfg["lang"])
+check("сонгосон чип дүүрээгүй", active._fill, theme.PANEL2)
+check("сонгосон чипийн хүрээ акцент", active._border, theme.ACCENT)
+check("сонгоогүй чип бүдэг", inactive.cget("fg"), theme.MUTED)
+
+# --- Төлөв: сүүлийн бичвэрүүд ---
+from monspeech.window import RECENT_ROWS, clip, day_label  # noqa: E402
+
+today = datetime.date.today().isoformat()
+check("өнөөдрийн шошго", day_label(f"{today}T09:10:00"), "Өнөөдөр")
+yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+check("өчигдрийн шошго", day_label(f"{yesterday}T09:10:00"), "Өчигдөр")
+check("хуучин огноо", day_label("2026-08-11T14:52:00"), "08-11")
+check("огноогүй мөр", day_label(""), "")
+check("гэмтсэн огноо", day_label("тэнэг"), "")
+
+check("богино текст хэвээр", clip("сайн уу"), "сайн уу")
+check("урт текст тайрагдана", len(clip("а" * 200)) <= 58, True)
+check("тайрсныг тэмдэглэнэ", clip("а" * 200).endswith("…"), True)
+check("олон зай нэг болно", clip("сайн   уу\n\nбайна"), "сайн уу байна")
+
+check("мөрийн тоо", len(ui.recent_rows), 2)
+check("хамгийн ихдээ таван мөр", RECENT_ROWS, 5)
+
+# Мөрийн үйлдлүүд жинхэнэ аппын методыг дуудаж байна уу
+check(
+    "мөр давхар товшилт хүлээж авна",
+    bool(ui.recent_rows[0].bind("<Double-Button-1>")),
+    True,
+)
+check("мөр гарын фокус авна", ui.recent_rows[0].cget("takefocus"), "1")
+ui._repaste_entry({"text": "хурлын тэмдэглэл"})
+check("дахин буулгах үйлдэл", app.repasted, "хурлын тэмдэглэл")
+ui._copy_entry({"text": "invoice before Friday"})
+check("хуулах үйлдэл", app.copied, "invoice before Friday")
+
+# Түүх цэвэрлэхэд Төлөв хуудас ч хоосорно — хоёр жагсаалт нэг эх сурвалжтай
+ui.clear_history()
+root.update()
+check("цэвэрлэхэд мөр үлдээгүй", len(ui.recent_rows), 0)
+check("хоосон үед ч цонх бүтэн", ui.recent_body.winfo_exists(), True)
+
+app.transcripts.entries = [
+    {"text": "буцаад ирлээ", "at": f"{today}T08:00:00"},
+]
+ui.refresh_history()
+root.update()
+check("шинэ бичвэр мөр болов", len(ui.recent_rows), 1)
 
 ui.set_detail("Микрофон солигдлоо.")
 check("доод мөрөнд мэдэгдэл", ui.detail_var.get(), "Микрофон солигдлоо.")
 
 ui._remember_type_mode_app()
 check("шууд бичих холбоос", ui.detail_var.get(), "«Notepad» цонхонд одооноос шууд бичнэ.")
+ui._remember_no_clean_app()
+check("цэвэрлэхгүй холбоос", ui.detail_var.get(), "«Obsidian» цонхонд одооноос үгчлэн бичнэ.")
 
 # --- Бичилтийн урьдчилан харах ---
 ui.select(2)
 root.update()
-check("урьдчилан харах эхэлдэг", ui.preview_var.get().startswith("␣Өнөөдрийн"), True)
+check("урьдчилан харах эхэлдэг", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
 ui.toggles["auto_capitalize"]._clicked()
 root.update()
-check("том үсэг унтраахад тусав", ui.preview_var.get().startswith("␣өнөөдрийн"), True)
+check("том үсэг асаахад тусав", ui.preview_var.get().startswith("␣Өнөөдрийн"), True)
+ui.toggles["verbatim_mode"]._clicked()
+root.update()
+check(
+    "үгчлэн preview хувиргахгүй",
+    ui.preview_var.get(),
+    "␣за ааа өнөөдрийн хурал гурван цагт болно цэг",
+)
+ui.toggles["verbatim_mode"]._clicked()
 
 # --- Анх ажиллуулахад танилцуулга гарна, дараа нь дахин гарахгүй ---
 check("танилцуулга гарсан", shown(ui.welcome), True)
@@ -315,6 +616,16 @@ ui.show_update("v9.9.9")
 root.update()
 check("хувилбарын мөр солигдсон", "v9.9.9" in ui.version_var.get(), True)
 check("шинэчлэх товч гарсан", shown(ui.update_button), True)
+
+# --- Sidebar: үндсэн цэс, доод бүлэг ---
+check("Тохиргоо доод бүлэгт", ui.settings_button.master is ui.utility, True)
+check("тусламжын мөр байна", ui.help_button.label.cget("text"), "Алдаа мэдээлэх")
+check("тусламж доод бүлэгт", ui.help_button.master is ui.utility, True)
+check("шинэчлэлийн тэмдэг Тохиргоо дээр", ui.settings_button.badge, True)
+check("үндсэн цэс тэмдэггүй", sum(b.badge for b in ui.nav), 0)
+ui.open_settings()
+check("цонх нээхэд тэмдэг арилсан", ui.settings_button.badge, False)
+ui.settings.hide()
 
 # --- Танигч: нэмэлт талбарууд зөвхөн өөрийн үйлчилгээнд гарна ---
 check("анхандаа талбарууд нуугдсан", shown(ui.stt.extra), False)
@@ -338,6 +649,7 @@ ui.toggle_sidebar()
 root.update()
 check("хумигдсан өргөн", ui.sidebar.cget("width"), 58)
 check("шошго нуугдсан", shown(ui.nav[0].label), False)
+check("лого жижигрэв", ui.logo.cget("image") != "" and ui.logo.cget("image") is not None, True)
 ui.toggle_sidebar()
 root.update()
 check("буцаж нээгдсэн", ui.sidebar.cget("width"), 208)
@@ -347,8 +659,44 @@ check("шошго эргэж ирсэн", shown(ui.nav[0].label), True)
 check(
     "цэсний нэрс",
     [name for _, name in NAV],
-    ["Төлөв", "Яриа", "Бичилт", "Товчлуур", "Толь", "Түүх", "Нэмэлт"],
+    ["Төлөв", "Толь", "Түүх", "Хөрвүүлэх", "Хэрэглээ", "Аппууд"],
 )
+check(
+    "тохиргооны хэсгүүд",
+    [name for _, name in SETTINGS_NAV],
+    ["Яриа", "Бичилт", "Товчлуур", "Нэмэлт"],
+)
+
+# --- Хэрэглээний хуудас: тоон карт, багана, халив ---
+ui.select(4)
+root.update()
+check("хэрэглээний хуудас нэр", ui.pages[4].title, "Хэрэглээ")
+check("хурдын карт бүртгэгдсэн", isinstance(ui.speed_var, tk.StringVar), True)
+check("халив зурагдсан", len(ui.heat_canvas.find_all()) > 0, True)
+check("багана зурагдсан", len(ui.bars_canvas.find_all()) > 0, True)
+check("гарагын шошго Ням эхэлнэ", ui.WEEKDAY_LABELS[0], "Ня")
+check("тасралтын хамгийн урт тооцоологдсон", "ХАМГИЙН УРТ" in ui.best_streak_var.get() or ui.best_streak_var.get() == "", True)
+# Хоосон статистикт хуудас унах ёсгүй, халив хоосон биш (хоосон нүд ч зурагдана)
+check("хурд хоосон үед —", ui.speed_var.get(), "—")
+
+# --- Тасралтын тооцоолол (цэвэр функц, Tk шаардахгүй) ---
+import datetime as _dt  # noqa: E402
+
+from monspeech.window import _streaks  # noqa: E402
+
+today = _dt.date.today()
+three_days = {str(today - _dt.timedelta(days=offset)): 10 for offset in range(3)}
+check("гурван хоногийн тасралт", _streaks(three_days), (3, 3))
+three_days[str(today)] = 0  # өнөөдөр хараахан бичээгүй — тасралт өчигдрөөс
+check("өнөөдөр хоосон бол өчигдрөөс тоолно", _streaks(three_days), (2, 2))
+gap = {
+    str(today - _dt.timedelta(days=5)): 10,
+    str(today - _dt.timedelta(days=4)): 10,
+    str(today - _dt.timedelta(days=1)): 5,
+    str(today): 5,
+}
+check("завсарласны дараах тасралт", _streaks(gap), (2, 2))
+check("хоосон өгөгдөл", _streaks({}), (0, 0))
 
 # --- Гарын фокус: Tab-аар хүрч, хүрсэн нь харагдана ---
 # Хулганагүй хүн зөвхөн Tab-аар явна. Хүрч болдоггүй товч, эсвэл хүрсэн ч
@@ -384,7 +732,6 @@ check("цэсэнд Tab хүрнэ", int(nav.cget("takefocus")), 1)
 check("цэсний дүрс тусдаа зогсоол биш", int(nav.icon.cget("takefocus")), 0)
 
 check("гулсуурт хүрээ бий", int(ui.sliders["silence_hold"].canvas.cget("highlightthickness")) > 0, True)
-check("хайлтын талбарт хүрээ бий", int(ui.search.entry.cget("highlightthickness")) > 0, True)
 
 # --- Сэдэв сонгох ---
 check("сэдвийн сонголт бий", ui.theme_var.get(), "Харанхуй")
@@ -402,7 +749,7 @@ check("буцаад харанхуй", app.cfg["theme"], "dark")
 # давхарласны дараа өргөн нь гүйлгэгчээс хамаарахаа болих ёстой.
 from monspeech.widgets import Card  # noqa: E402 - Tk шалгасны дараа
 
-page = ui.pages[6]
+page = ui.settings.pages[3]
 before = page.body.winfo_width()
 card = Card(page.body)
 for index in range(12):

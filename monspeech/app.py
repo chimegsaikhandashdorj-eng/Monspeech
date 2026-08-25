@@ -22,17 +22,30 @@ import webbrowser
 
 import pyperclip
 
-from . import __version__, autostart, recognizer, update, winfocus
+from . import (
+    __version__,
+    animate,
+    autostart,
+    filetext,
+    injector,
+    mics,
+    recognizer,
+    textproc,
+    update,
+    winfocus,
+)
 from .audio import MIN_THRESHOLD, Recorder
 from .config import Config
 from .history import InsertionHistory
 from .hotkeys import HotkeyManager, parse_combo, pretty
 from .instance import ShowListener, already_running, request_show
+from .mics import Mic
 from .logging_setup import LOG_PATH, get as get_logger, install_crash_handler
 from .overlay import WaveOverlay
 from .pipeline import RecognitionWorker
+from .samples import HardSampleStore
 from .store import TranscriptStore, UsageStats
-from .textproc import Formatter, learn_corrections, parse_replacements
+from .textproc import Formatter, learn_corrections, parse_actions, parse_replacements
 from .tray import Tray
 from .window import CODE_TO_NAME, ControlWindow, unknown_language_codes
 from .winfocus import TargetWindow, activate
@@ -42,7 +55,22 @@ log = get_logger("app")
 KEEPALIVE_SECONDS = 20  # урт яриан дунд холболт хуучрахаас сэргийлнэ
 QUEUE_WARN = 2
 QUEUE_LIMIT = 10
-HOTKEY_KEYS = ("ptt_key", "ptt_key_alt", "hotkey", "undo_key")
+
+
+def _times(payload) -> int:
+    """Эвентийн аргументыг давталтын тоо болгоно (эвдэрсэн бол 1).
+
+    Товчлуураар ирэхэд `None`, дуут командаар ирэхэд "2" гэх мэт мөр байна.
+    """
+    try:
+        return max(1, int(payload))
+    except (TypeError, ValueError):
+        return 1
+
+
+HOTKEY_KEYS = (
+    "ptt_key", "ptt_key_alt", "hotkey", "undo_key", "variant_key", "command_key",
+)
 # Цонх фокус аваагүй бол эдгээр хугацааны дараа дахин оролдоно. Windows нь
 # өөр процесс сая ажилласан агшинд фокус солихыг хаадаг ба тэр хориг хэдэн зуун
 # миллисекундын дараа суларна.
@@ -61,37 +89,68 @@ class MonspeechApp:
         self.insertions = InsertionHistory()
         self._level = 0.0
         self._pending = 0
+        # Сүүлийн таналтын хувилбарууд: {"items": [...], "index": 0, "entry": {...}}.
+        # Товчоор ээлжлүүлэхэд л хэрэглэнэ, дараагийн таналтад дарагдана.
+        self._variants: dict | None = None
         self._active_lang = self.cfg["lang"]
+        self._active_clean = bool(self.cfg["clean_speech"])
+        self._active_auto = bool(self.cfg["detect_language"])
+        self._active_verbatim = bool(self.cfg["verbatim_mode"])
+        # Энэ бичлэг команд горимынх эсэх (тусдаа товчлуураар эхэлсэн)
+        self._active_command = False
         self._last_prewarm = 0.0
+        # Файл хөрвүүлэлт явж байна уу. `transcribe_file` энэ талбарыг эхний
+        # мөрөндөө уншдаг тул ЭНД заавал үүсгэнэ — эс бөгөөс анхны товшилт
+        # `AttributeError` шидэж, хөрвүүлэлт хэзээ ч эхлэхгүй.
+        self._file_busy = False
 
         self.transcripts = TranscriptStore()
         self.stats = UsageStats()
+        # Хэцүү тохиолдлын дуу — сайжруулалтыг ХЭМЖИХ сан. Анхнаасаа
+        # унтраалттай (хэрэглэгчийн дууг диск дээр бичдэг тул).
+        self.samples = HardSampleStore(enabled=bool(self.cfg["save_hard_audio"]))
         self.formatter = Formatter(
             auto_space=self.cfg["auto_space"],
             auto_capitalize=self.cfg["auto_capitalize"],
             voice_punctuation=self.cfg["voice_punctuation"],
             replacements=self.cfg["replacements"],
             snippets=self.cfg["snippets"],
+            names=self.cfg["names"],
         )
         # Өмнөх ажиллагааны түүхээр үрээнэ — эс бөгөөс хувилбар сонгох жин
         # апп нээх бүрд тэгээс эхэлнэ.
         for entry in self.transcripts.entries:
-            self.formatter.remember(str(entry.get("text") or ""))
+            if entry.get("mode") != "verbatim":
+                self.formatter.remember(str(entry.get("text") or ""))
         self.recognizer = recognizer.create(self.cfg)
         self.target = TargetWindow()
+        # Хуучин тохиргоонд нэр байхгүй тул эхлэхдээ нэг удаа нөхнө — эс бөгөөс
+        # «нэрээр нь олох» нь микрофоноо дахин сонгосон хүнд л ажиллана.
+        mic = mics.load(self.cfg)
+        if mic != mics.Mic(int(self.cfg["mic_index"]), str(self.cfg["mic_name"])):
+            mic.save_to(self.cfg)
+            self.cfg.save()
         self.recorder = Recorder(
             on_segment=self._on_segment,
             on_level=self._on_level,
             on_error=self._on_audio_error,
-            device_index=self._device_index(),
+            mic=mic,
             max_seconds=float(self.cfg["max_recording_seconds"]),
             silence_hold=float(self.cfg["silence_hold"]),
             keep_open_seconds=float(self.cfg["mic_keep_open_seconds"]),
+            preroll_seconds=float(self.cfg["preroll_seconds"]),
+            vad_enabled=bool(self.cfg["vad"]),
         )
+
+        # Хөдөлгөөнийг цонх БАРИХААС өмнө тохируулна: виджет бүр өөрийн
+        # `Motion`-ыг үүсгэх үедээ энэ утгыг уншина.
+        animate.enabled = bool(self.cfg["animations"])
 
         self.root = tk.Tk()
         self.root.title("Monspeech")
-        self.root.attributes("-topmost", True)
+        # Бусад апптай адил жирийн цонх: өөр програм руу шилжвэл ард нь
+        # орно. Курсорын доорх долгион (overlay) л байнга дээр байна — тэр
+        # нь тусдаа, фокус авдаггүй цонх.
         self._set_window_icon()
         self.ui = ControlWindow(self.root, self)
         self.overlay = WaveOverlay(self.root, get_level=lambda: self._level)
@@ -118,7 +177,12 @@ class MonspeechApp:
             insertions=self.insertions,
             target=self.target,
             insert_mode=self._insert_mode,
+            provider_factory=lambda language: recognizer.create(self.cfg, language),
+            samples=self.samples,
         )
+        # Сүүлийн таван батлагдсан/оруулсан хэл session эхлэхэд prior болно.
+        for entry in self.transcripts.entries[-5:]:
+            self.worker.router.confirm_language(str(entry.get("lang") or ""))
         self.worker.start()
 
         # Ажлын ширээний дүрс дээр дахин товшиход энэ цонх урд нь гарна
@@ -162,35 +226,39 @@ class MonspeechApp:
     # ------------------------------------------------------------------
     # Микрофон
     # ------------------------------------------------------------------
-    def _device_index(self):
-        index = int(self.cfg["mic_index"])
-        return None if index < 0 else index
-
     @staticmethod
-    def list_microphones() -> tuple[list[str], list[int]]:
-        names = ["Системийн үндсэн"]
-        indexes = [-1]
-        try:
-            import pyaudio
+    def microphones() -> list[Mic]:
+        """Сонгож болох микрофонууд — эхнийх нь үргэлж системийн үндсэн."""
+        return mics.available()
 
-            pa = pyaudio.PyAudio()
-            try:
-                for i in range(pa.get_device_count()):
-                    info = pa.get_device_info_by_index(i)
-                    if int(info.get("maxInputChannels", 0)) > 0:
-                        names.append(str(info.get("name", f"#{i}"))[:38])
-                        indexes.append(i)
-            finally:
-                pa.terminate()
-        except Exception:  # noqa: BLE001 - жагсаалт гаргаж чадахгүй ч апп ажиллана
-            pass
-        return names, indexes
+    def _mic_notice(self) -> str:
+        """Сонгосон микрофоны ОРОНД өөр төхөөрөмж нээгдсэн бол хэлэх үг.
+
+        Чимээгүй шилжвэл хүн чихэвчээрээ ярьж байгаад суурин микрофоноор
+        бичигдсэнээ мэдэхгүй өнгөрнө. Нэрээр нь олдсон бол (дугаар нь шилжсэн
+        ч ЯГ тэр төхөөрөмж) дуугарах шаардлагагүй — логонд л үлдэнэ.
+        """
+        mic = self.recorder.mic
+        if mic.is_default or self.recorder.active_index is not None:
+            return ""
+        return f"«{mic.label}» олдсонгүй — системийн үндсэн микрофоноор бичиж байна."
 
     # ------------------------------------------------------------------
     # Дуу таних дамжлага
     # ------------------------------------------------------------------
     def _on_segment(self, pcm: bytes, final: bool) -> None:
-        self.segments.put((pcm, self._active_lang))
+        # Хэл ба цэвэрлэгээний шийдвэрийг сегменттэй хамт явуулна: таних ажил
+        # дуусах үед фокус өөр цонх дээр байвал буруу цонхны дүрэм үйлчилнэ.
+        self.segments.put(
+            (
+                pcm,
+                self._active_lang,
+                self._active_clean,
+                self._active_auto,
+                self._active_verbatim,
+                self._active_command,
+            )
+        )
         self.events.put(("pending", +1))
 
     def _on_level(self, level: float) -> None:
@@ -211,7 +279,26 @@ class MonspeechApp:
             "update": lambda tag: self.ui.show_update(str(tag)),
             "error": lambda message: self._fail(str(message)),
             "audio_error": self._on_audio_failure,
-            "undo": lambda _: self.undo_last(),
+            # Дуут үйлдлүүд. `pipeline` нь үйлдлийн нэрийг эвент болгон
+            # илгээдэг тул шинийг нэмэхэд энд нэг мөр нэмэхэд хангалттай.
+            "undo": lambda times: self.undo_last(_times(times)),
+            "repeat": lambda times: self.repeat_last(_times(times)),
+            "copy": lambda _: self.copy_last(),
+            "copied": self._on_copied,
+            # Дуут засвар: сүүлийн оруулгыг бүтнээр нь дахин бичих замаар
+            # хэрэгжинэ (курсор дээрх байдал ба аппын санамж зөрөхгүй).
+            "drop_words": lambda count: self.edit_last("drop_words", count),
+            "capitalize": lambda _: self.edit_last("capitalize"),
+            "lowercase": lambda _: self.edit_last("lowercase"),
+            "no_space": lambda _: self.edit_last("no_space"),
+            "replace_word": lambda words: self.edit_last("replace_word", words),
+            "variant": lambda _: self.cycle_variant(),
+            "misdirected": self._on_misdirected,
+            "file_progress": self._on_file_progress,
+            "file_done": self._on_file_done,
+            "command": self._on_command,
+            "command_missed": self._on_command_missed,
+            "stop": lambda _: self.stop(),
             "toggle": lambda _: self.toggle(),
             "ptt": self._on_ptt,
             "captured": lambda payload: self.ui.finish_capture(*payload),
@@ -219,12 +306,118 @@ class MonspeechApp:
         }
 
     def _on_recognized(self, payload) -> None:
-        text, _entry = payload
-        self.ui.set_detail(text)
+        text, entry, *rest = payload
+        variants = rest[0] if rest else []
+        # Хоёроос цөөн хувилбартай бол сэлгэх зүйл алга — төлвөө цэвэрлэнэ.
+        self._variants = (
+            {"items": list(variants), "index": 0, "entry": entry}
+            if len(variants) > 1
+            else None
+        )
+        language = str(entry.get("lang") or "")
+        label = {"mn-MN": "MN", "en-US": "EN", "mixed": "MN+EN"}.get(
+            language, language
+        )
+        confidence = entry.get("confidence")
+        meta = label
+        if confidence is not None:
+            meta += f" {float(confidence) * 100:.0f}%"
+        self.ui.set_detail(f"{text}  ·  {meta}" if meta else text)
         self.ui.refresh_history()
         self.ui.refresh_stats()
         if self.cfg["wave_overlay"] and not self.listening:
             self.overlay.flash(text)
+
+    def _on_copied(self, length) -> None:
+        self.ui.set_detail(f"Clipboard руу хууллаа ({int(length)} тэмдэгт).")
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash("Хууллаа")
+
+    def _on_misdirected(self, text) -> None:
+        """Зорилтот цонх алга — текстийг хаясангүй, clipboard руу хуулна.
+
+        Чимээгүй өнгөрөх нь хамгийн муу: хэрэглэгч ярьсан зүйл нь хаана ч
+        гарахгүй бол алдагдсан гэж бодно. Түүхэнд аль хэдийн бичигдсэн тул
+        энд зөвхөн хурдан гарц (Ctrl+V) санал болгоно.
+        """
+        content = str(text).strip()
+        if content and injector.copy_to_clipboard(content):
+            message = "Зорилтот цонх идэвхжсэнгүй — clipboard-д хууллаа (Ctrl+V)."
+        else:
+            message = "Зорилтот цонх идэвхжсэнгүй — текст Түүхэнд үлдлээ."
+        log.warning("%s", message)
+        self.ui.set_detail(message)
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash("Цонх идэвхжсэнгүй", kind="warning")
+
+    def _on_command(self, pressed) -> None:
+        """Команд товчлуур дарагдсан/суллагдсан."""
+        if pressed:
+            self.start(command=True)
+        else:
+            self.stop()
+
+    def _on_command_missed(self, phrase) -> None:
+        heard = str(phrase).strip()
+        log.info("команд танигдсангүй: %d тэмдэгт", len(heard))
+        self.ui.set_detail(f"Танихгүй команд: «{heard}»")
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash(f"«{heard}» — команд биш", kind="warning")
+
+    def _on_file_progress(self, payload) -> None:
+        index, total = payload
+        self.ui.set_file_progress(f"Хөрвүүлж байна… {index}/{total}")
+
+    def _on_file_done(self, payload) -> None:
+        message, text = payload
+        self.ui.set_file_progress(message)
+        self.ui.set_detail(message)
+        self.ui.refresh_history()
+        if text and self.cfg["wave_overlay"]:
+            self.overlay.flash("Хөрвүүлж дууслаа")
+
+    def transcribe_file(self, path: str) -> None:
+        """Аудио/видео файлыг дэвсгэрт хөрвүүлнэ (цонх царцахгүй).
+
+        Үр дүнг эх файлын хажууд `.txt` болгож хадгална — урт бичлэгийн
+        текстийг курсор руу шидэх нь утгагүй, харин файл нь хаана ч хэрэгтэй.
+        Мөр бүрийг Түүхэнд ч нэмнэ: хайлт, толь сурах хоёр тэндээс ажиллана.
+        """
+        if self._file_busy:
+            self.ui.set_detail("Өмнөх файл хараахан дуусаагүй байна.")
+            return
+        self._file_busy = True
+        self.ui.set_file_progress("Файлыг уншиж байна…")
+        threading.Thread(target=self._transcribe_file, args=(path,), daemon=True).start()
+
+    def _transcribe_file(self, path: str) -> None:
+        try:
+            text = filetext.transcribe(
+                path,
+                self.recognizer,
+                lang=str(self.cfg["lang"]),
+                on_progress=lambda index, total: self.events.put(
+                    ("file_progress", (index, total))
+                ),
+            )
+            if not text.strip():
+                self.events.put(("file_done", ("Файлаас текст гарсангүй.", "")))
+                return
+            for line in text.splitlines():
+                if line.strip():
+                    self.transcripts.add(line.strip(), str(self.cfg["lang"]))
+            target = filetext.save_text(path, text)
+            words = len(text.split())
+            self.events.put(
+                ("file_done", (f"Бэлэн: {words} үг → {target.name}", text))
+            )
+        except filetext.FileError as exc:
+            self.events.put(("file_done", (str(exc), "")))
+        except Exception as exc:  # noqa: BLE001 - файл хөрвүүлэлт аппыг унагахгүй
+            log.exception("файл хөрвүүлэхэд алдаа")
+            self.events.put(("file_done", (f"Хөрвүүлж чадсангүй: {exc}", "")))
+        finally:
+            self._file_busy = False
 
     def _on_pending(self, delta) -> None:
         self._pending = max(0, self._pending + int(delta))
@@ -236,32 +429,50 @@ class MonspeechApp:
 
     def _on_ptt(self, payload) -> None:
         lang, pressed = payload
-        self.start(lang) if pressed else self.stop()
+        self.start(str(lang) or None) if pressed else self.stop()
 
     def _drain_events(self) -> None:
+        """Дарааллыг цэвэрлээд өөрийгөө дахин товлоно.
+
+        Дахин товлолт нь ЗААВАЛ хийгдэнэ (`finally`). Энэ дуудлага хагас
+        замдаа алдаагаар таслагдвал Tk нь алдааг логлоод залгина — апп амьд
+        харагдсаар байгаад эвент боловсруулахаа БҮРМӨСӨН болино: таньсан текст
+        гарахгүй, төлөв шинэчлэгдэхгүй, статистик хадгалагдахгүй. Нэг виджетийн
+        алдаа аппыг бүхэлд нь ингэж унтраах ёсгүй тул хариу үйлдэл бүрийг
+        тусад нь ч хамгаална.
+        """
         handlers = self._event_handlers
+        quitting = False
         try:
             while True:
-                kind, payload = self.events.get_nowait()
+                try:
+                    kind, payload = self.events.get_nowait()
+                except queue.Empty:
+                    break
                 if kind == "quit":
+                    quitting = True  # цонх устаж байгаа тул дахин товлохгүй
                     self.quit()
                     return
                 handler = handlers.get(kind)
                 if handler is None:
                     log.warning("танихгүй эвент: %s", kind)
                     continue
-                handler(payload)
-        except queue.Empty:
-            pass
-        self.ui.set_level(self._level, self.listening)
-        self._keepalive()
-        self.stats.save()
-        self.root.after(50, self._drain_events)
+                try:
+                    handler(payload)
+                except Exception:  # noqa: BLE001 - нэг эвент бусдыг зогсоохгүй
+                    log.exception("«%s» эвент бүтэлгүйтлээ", kind)
+            self.ui.set_level(self._level, self.listening)
+            self._keepalive()
+            self.stats.save()
+        except Exception:  # noqa: BLE001
+            log.exception("эвент дамжуулагчид алдаа гарлаа")
+        finally:
+            if not quitting:
+                self.root.after(50, self._drain_events)
 
     def _after_pending_change(self) -> None:
-        if not self.listening and not self._pending:
-            if self.overlay.mode != "message":
-                self.overlay.hide()
+        if not self.listening and not self._pending and self.overlay.mode != "message":
+            self.overlay.hide()
         self._refresh_status()
         if self._pending >= QUEUE_LIMIT and self.listening:
             self.stop()
@@ -339,7 +550,16 @@ class MonspeechApp:
             + (" (багцалсан)" if getattr(sys, "frozen", False) else ""),
             f"Танигч: {provider}" + (" (өөрийн хаягтай)" if self.cfg["stt_url"] else ""),
             f"Хэл: {self.cfg['lang']} / {self.cfg['lang_alt']}",
-            f"Микрофон: {self.cfg['mic_index']}",
+            # Сонгосон нь ба ҮНЭХЭЭР нээгдсэн нь: хоёр нь зөрсөн бол
+            # төхөөрөмжийн дугаар шилжсэн гэсэн үг — оношилгооны гол мөр.
+            # Төхөөрөмжийн нэр нь хүний нэр агуулж мэднэ («Dash's Buds») тул
+            # энд зөвхөн дугаарууд орно — энэ текстийг хүн рүү явуулдаг.
+            f"Микрофон: №{self.recorder.mic.index} → "
+            + (
+                f"нээгдсэн №{self.recorder.active_index}"
+                if self.recorder.stream_open
+                else "хаалттай"
+            ),
             f"Толь: {len(self.cfg['replacements'])} үг, {len(self.cfg['snippets'])} товчлол",
             f"Лог: {LOG_PATH}",
         ]
@@ -391,7 +611,10 @@ class MonspeechApp:
             previous.close()
         except Exception as exc:  # noqa: BLE001
             log.warning("хуучин танигчийг хаахад алдаа: %s", exc)
-        self.worker.recognizer = self.recognizer
+        self.worker.set_recognizer(
+            self.recognizer,
+            lambda language: recognizer.create(self.cfg, language),
+        )
         self.recognizer.prewarm_async()
         self.cfg.save()
         title = dict(recognizer.titles()).get(
@@ -412,9 +635,11 @@ class MonspeechApp:
         log.info("сэдэв солигдлоо: %s (дахин эхлүүлэхэд идэвхжинэ)", code)
         self.ui.set_detail("Сэдэв хадгалагдлаа — дахин эхлүүлэхэд идэвхжинэ.")
 
-    def on_mic_changed(self, index: int) -> None:
-        self.cfg["mic_index"] = index
-        self.recorder.device_index = None if index < 0 else index
+    def on_mic_changed(self, mic: Mic) -> None:
+        # Дугаарын хажуугаар нэрийг нь хадгална: чихэвч салгаж холбоход дугаар
+        # шилждэг тул дараа нь нэрээр нь дахин олно (`mics.resolve`).
+        mic.save_to(self.cfg)
+        self.recorder.mic = mic
         self.recorder.close()  # шинэ төхөөрөмжөөр дахин нээгдэнэ
         self.cfg.save()
         self.ui.set_detail("Микрофон солигдлоо.")
@@ -427,6 +652,12 @@ class MonspeechApp:
             auto_capitalize=self.cfg["auto_capitalize"],
             voice_punctuation=self.cfg["voice_punctuation"],
         )
+        if key == "animations":
+            animate.enabled = bool(value)
+        if key == "vocabulary_boost":
+            self.refresh_vocabulary()
+        elif key == "double_tap_enabled":
+            self._bind_hotkeys()
         if key == "ptt_enabled":
             self._bind_hotkeys()
         elif key == "tray_enabled":
@@ -435,6 +666,11 @@ class MonspeechApp:
             self.overlay.hide()
         elif key == "start_with_windows":
             self._apply_autostart_setting(bool(value))
+        elif key == "vad":
+            self.recorder.set_vad(bool(value))
+        elif key == "save_hard_audio":
+            self.samples.set_enabled(bool(value))
+            self.ui.refresh_samples()
         self.cfg.save()
 
     def _apply_autostart_setting(self, wanted: bool) -> None:
@@ -465,6 +701,8 @@ class MonspeechApp:
             self.recorder.keep_open_seconds = float(value)
             if not value:
                 self.recorder.close()
+        elif key == "preroll_seconds":
+            self.recorder.preroll_seconds = float(value)
         elif key == "max_recording_seconds":
             # Явж байгаа бичлэгт ч шууд үйлчилнэ
             self.recorder.max_seconds = float(value)
@@ -491,19 +729,121 @@ class MonspeechApp:
             return str(self.cfg["lang"])
         return str(self.cfg["lang_apps"].get(marker) or self.cfg["lang"])
 
-    def remember_type_mode_app(self) -> str:
-        """Одоогийн цонхыг "шууд бичих" жагсаалтад нэмнэ."""
+    def _window_clean(self) -> bool:
+        """Энэ цонхонд ярианы чигчлүүрийг цэвэрлэх үү.
+
+        Ерөнхий тохиргоо асаалттай ч зарим цонхонд ҮГЧЛЭН бичих хэрэгтэй
+        байдаг (эш татах, ярианы тэмдэглэл) — тэднийг жагсаалтаар хасна.
+        Хэлний адилаар шийдвэрийг товч дарсан агшинд гаргана: таних ажил
+        дуусах үед фокус аль хэдийн өөр цонх дээр байж болно.
+        """
+        verbatim = bool(self.cfg.get("verbatim_mode", False)) or (
+            self._match_window(self.cfg["no_clean_apps"]) is not None
+        )
+        return bool(self.cfg["clean_speech"]) and not verbatim
+
+    def _window_verbatim(self) -> bool:
+        """Глобал эсвэл цонхны дүрмээр бүрэн үгчлэн бичих эсэх."""
+
+        if self.cfg["verbatim_mode"]:
+            return True
+        return self._match_window(self.cfg["no_clean_apps"]) is not None
+
+    def _remember_window_in(self, key: str, label: str) -> str:
+        """Одоогийн цонхны нэрийг заасан жагсаалтад нэмнэ."""
         title = self.target.title()
         if not title:
             return "Цонх тодорхойгүй байна."
         marker = title.split(" - ")[-1].strip()[:40] or title[:40]
-        apps = list(self.cfg["type_mode_apps"])
+        apps = list(self.cfg[key])
         if marker.lower() in [a.lower() for a in apps]:
             return f"«{marker}» аль хэдийн жагсаалтад байна."
         apps.append(marker)
-        self.cfg["type_mode_apps"] = apps
+        self.cfg[key] = apps
         self.cfg.save()
-        return f"«{marker}» цонхонд одооноос шууд бичнэ."
+        return f"«{marker}» цонхонд одооноос {label}."
+
+    #: Дүрмийн төрөл → тохиргооны түлхүүр. Жагсаалтын төрлүүд л энд байна;
+    #: хэл нь толь (`lang_apps`) тул тусад нь.
+    RULE_LISTS = {"type_mode": "type_mode_apps", "no_clean": "no_clean_apps"}
+
+    def current_window_marker(self) -> str:
+        """Товч дарсан агшны цонхны нэрнээс дүрэмд тохирох хэсгийг гаргана."""
+        title = self.target.title()
+        if not title:
+            return ""
+        return title.split(" - ")[-1].strip()[:40] or title[:40]
+
+    def window_rules(self) -> list[dict]:
+        """Гурван тусдаа жагсаалтыг апп тус бүрээр нэгтгэж харуулна.
+
+        Хэрэглэгч «энэ цонхонд юу үйлчилж байна вэ» гэдгээ нэг дор харах
+        ёстой — өмнө нь хэл нь Толинд, бусад нь Бичилт дээр тарсан байв.
+        """
+        rules: dict[str, dict] = {}
+
+        def slot(marker: str) -> dict:
+            return rules.setdefault(
+                marker,
+                {"marker": marker, "lang": "", "type_mode": False, "no_clean": False},
+            )
+
+        for marker, code in dict(self.cfg["lang_apps"]).items():
+            slot(str(marker))["lang"] = str(code)
+        for kind, key in self.RULE_LISTS.items():
+            for marker in list(self.cfg[key]):
+                slot(str(marker))[kind] = True
+        return [rules[name] for name in sorted(rules, key=str.lower)]
+
+    def window_rule(self, marker: str) -> dict:
+        """Нэг аппын дүрэм (байхгүй бол хоосон утгууд)."""
+        marker = (marker or "").strip().lower()
+        for rule in self.window_rules():
+            if rule["marker"].lower() == marker:
+                return rule
+        return {"marker": marker, "lang": "", "type_mode": False, "no_clean": False}
+
+    def set_window_rule(self, marker: str, kind: str, value) -> str:
+        """Нэг дүрмийг тавих/авах. Хоосон утга нь дүрмийг устгана."""
+        marker = (marker or "").strip()
+        if not marker:
+            return "Цонх тодорхойгүй байна."
+        if kind == "lang":
+            mapping = {
+                name: code
+                for name, code in dict(self.cfg["lang_apps"]).items()
+                if str(name).lower() != marker.lower()
+            }
+            if value:
+                mapping[marker] = str(value)
+            self.cfg["lang_apps"] = mapping
+        else:
+            key = self.RULE_LISTS[kind]
+            apps = [a for a in self.cfg[key] if str(a).lower() != marker.lower()]
+            if value:
+                apps.append(marker)
+            self.cfg[key] = apps
+        self.cfg.save()
+        log.info("«%s» цонхны дүрэм шинэчлэгдлээ (%s)", marker, kind)
+        return f"«{marker}» дүрэм хадгалагдлаа."
+
+    def remove_window_rule(self, marker: str) -> str:
+        """Тухайн аппын БҮХ дүрмийг устгана."""
+        marker = (marker or "").strip()
+        if not marker:
+            return "Цонх тодорхойгүй байна."
+        self.set_window_rule(marker, "lang", "")
+        for kind in self.RULE_LISTS:
+            self.set_window_rule(marker, kind, False)
+        return f"«{marker}» дүрэм устлаа."
+
+    def remember_type_mode_app(self) -> str:
+        """Одоогийн цонхыг «шууд бичих» жагсаалтад нэмнэ."""
+        return self._remember_window_in("type_mode_apps", "шууд бичнэ")
+
+    def remember_no_clean_app(self) -> str:
+        """Одоогийн цонхыг «цэвэрлэхгүй» жагсаалтад нэмнэ."""
+        return self._remember_window_in("no_clean_apps", "үгчлэн бичнэ")
 
     def on_snippets_changed(self, raw: str) -> int:
         mapping = parse_replacements(raw)
@@ -511,6 +851,23 @@ class MonspeechApp:
         self.formatter.set_snippets(mapping)
         self.cfg.save()
         self.ui.set_detail(f"{len(mapping)} товчлол хадгалагдлаа.")
+        return len(mapping)
+
+    def on_actions_changed(self, raw: str) -> int:
+        """Хэрэглэгчийн дуут үйлдлийн толь. Дамжлага нь `cfg`-ээс шууд уншина."""
+        mapping = parse_actions(raw)
+        self.cfg["actions"] = mapping
+        self.cfg.save()
+        self.ui.set_detail(f"{len(mapping)} дуут үйлдэл хадгалагдлаа.")
+        return len(mapping)
+
+    def on_names_changed(self, raw: str) -> int:
+        mapping = parse_replacements(raw)
+        self.cfg["names"] = mapping
+        self.formatter.set_names(mapping)
+        self.cfg.save()
+        self.refresh_vocabulary()
+        self.ui.set_detail(f"{len(mapping)} нэр хадгалагдлаа.")
         return len(mapping)
 
     def on_lang_apps_changed(self, raw: str) -> int:
@@ -532,12 +889,46 @@ class MonspeechApp:
     def on_transcript_corrected(self, entry: dict, corrected: str) -> str:
         """Түүхэн дэх мөрийг зассан — ялгааг нь толинд сурна."""
         heard = entry.get("text", "")
+        # Дууг нь зөв текстийн хамт хадгална: benchmark-ийн хамгийн үнэ
+        # цэнэтэй мөр нь ЯГ энэ — хүн буруу гэдгийг нь баталсан жишээ.
+        # `replace()`-ийн ӨМНӨ: тэр нь `entry["text"]`-ийг дарж бичдэг тул
+        # дараа нь дуудвал «юу сонссон» тал нь алдагдана.
+        self.samples.promote(entry, corrected)
         self.transcripts.replace(entry, corrected)
         if not self.cfg["learn_corrections"]:
             return "Түүх зассан."
-        learned = learn_corrections(heard, corrected)
+        learned = self._learn_pair(heard, corrected)
         if not learned:
             return "Түүх зассан (сурах үг олдсонгүй)."
+        pairs = ", ".join(f"{k} → {v}" for k, v in learned.items())
+        return f"Сурлаа: {pairs}"
+
+    def clear_samples(self) -> str:
+        """Хадгалсан хэцүү жишээг бүгдийг устгана."""
+        self.samples.clear()
+        log.info("хэцүү жишээнүүдийг цэвэрлэлээ")
+        return "Жишээнүүдийг устгалаа."
+
+    def refresh_vocabulary(self) -> None:
+        """Толиос бэлдсэн дохиог ажиллаж байгаа танигчид тарааана.
+
+        Танигчийг дахин бүтээхгүй: холболт, урьдчилсан дулаацуулалт хэвээр
+        үлдэнэ — толь засах нь дараагийн бичлэгийг хойшлуулах ёсгүй.
+        """
+        hint = recognizer.vocabulary_for(self.cfg)
+        try:
+            self.recognizer.set_vocabulary(hint)
+            self.worker.router.set_vocabulary(hint)
+        except Exception as exc:  # noqa: BLE001 - дохиогүй ч танилт ажиллана
+            log.warning("толийн дохиог шинэчилж чадсангүй: %s", exc)
+            return
+        log.info("толийн дохио: %d тэмдэгт", len(hint))
+
+    def _learn_pair(self, heard: str, corrected: str) -> dict[str, str]:
+        """Буруу/зөв хосоос ялгаатай үгсийг толинд нэмнэ. Нэмэгдсэнийг буцаана."""
+        learned = learn_corrections(heard, corrected)
+        if not learned:
+            return {}
         mapping = dict(self.cfg["replacements"])
         mapping.update(learned)
         self.cfg["replacements"] = mapping
@@ -548,10 +939,19 @@ class MonspeechApp:
             replacements=mapping,
         )
         self.cfg.save()
+        self.refresh_vocabulary()
         self.ui.refresh_words()
-        pairs = ", ".join(f"{k} → {v}" for k, v in learned.items())
-        log.info("толинд нэмэгдлээ: %s", pairs)
-        return f"Сурлаа: {pairs}"
+        log.info("толинд нэмэгдлээ: %s", ", ".join(f"{k} → {v}" for k, v in learned.items()))
+        return learned
+
+    def on_transcript_language_changed(self, entry: dict, language: str) -> str:
+        """Түүхээс баталсан хэлийг хадгалж, session-ийн auto prior-д сургана."""
+
+        self.transcripts.set_language(entry, language)
+        self.worker.router.confirm_language(language)
+        label = CODE_TO_NAME.get(language, language)
+        log.info("түүхийн хэлийг хэрэглэгч батлав: %s", language)
+        return f"Хэл батлагдлаа: {label}."
 
     def on_replacements_changed(self, raw: str) -> int:
         mapping = parse_replacements(raw)
@@ -563,6 +963,7 @@ class MonspeechApp:
             replacements=mapping,
         )
         self.cfg.save()
+        self.refresh_vocabulary()
         self.ui.set_detail(f"{len(mapping)} орлуулга хадгалагдлаа.")
         return len(mapping)
 
@@ -604,12 +1005,30 @@ class MonspeechApp:
             self.hotkeys.bind(
                 "undo", self.cfg["undo_key"], on_press=lambda: self.events.put(("undo", None))
             )
+            self.hotkeys.bind(
+                "variant",
+                self.cfg["variant_key"],
+                on_press=lambda: self.events.put(("variant", None)),
+            )
+            if self.cfg["double_tap_enabled"]:
+                # Гар байрлалаа алдалгүй асаах: Ctrl-ыг хоёр хурдан дарна.
+                self.hotkeys.bind_double(
+                    "double_tap",
+                    self.cfg["double_tap_key"],
+                    lambda: self.events.put(("toggle", None)),
+                )
+            self.hotkeys.bind(
+                "command",
+                self.cfg["command_key"],
+                on_press=lambda: self.events.put(("command", True)),
+                on_release=lambda: self.events.put(("command", False)),
+            )
             if self.cfg["ptt_enabled"]:
                 self.hotkeys.bind(
                     "ptt",
                     self.cfg["ptt_key"],
-                    on_press=lambda: self.events.put(("ptt", (self.cfg["lang"], True))),
-                    on_release=lambda: self.events.put(("ptt", (self.cfg["lang"], False))),
+                    on_press=lambda: self.events.put(("ptt", ("", True))),
+                    on_release=lambda: self.events.put(("ptt", ("", False))),
                 )
                 self.hotkeys.bind(
                     "ptt_alt",
@@ -636,19 +1055,161 @@ class MonspeechApp:
             daemon=True,
         ).start()
 
-    def undo_last(self) -> None:
-        item = self.insertions.take_last()
-        if not item:
+    def undo_last(self, times: int = 1) -> None:
+        """Сүүлийн `times` оруулгыг устгана.
+
+        Оруулгууд курсор дээр зэрэгцээ байрлах тул нийт тэмдэгтийг НЭГ
+        удаагийн устгалаар явуулна — олон thread ээлжлэн бичихээс сэргийлнэ.
+        """
+        count = 0
+        taken = 0
+        for _ in range(times):
+            item = self.insertions.take_last()
+            if not item:
+                break
+            count += item[1]
+            taken += 1
+        if not count:
             self.ui.set_detail("Буцаах зүйл алга.")
             if self.cfg["wave_overlay"]:
                 self.overlay.flash("Буцаах зүйл алга", kind="warning")
             return
-        text, count = item
-        log.info("буцаалаа: %d тэмдэгт", count)
+        log.info("буцаалаа: %d оруулга, %d тэмдэгт", taken, count)
         self._deliver("", count, remember=False)
-        self.ui.set_detail(f"Буцаалаа ({count} тэмдэгт).")
+        suffix = f" ×{taken}" if taken > 1 else ""
+        self.ui.set_detail(f"Буцаалаа{suffix} ({count} тэмдэгт).")
         if self.cfg["wave_overlay"]:
-            self.overlay.flash("Буцаалаа", kind="warning")
+            self.overlay.flash(f"Буцаалаа{suffix}", kind="warning")
+
+    def repeat_last(self, times: int = 1) -> None:
+        """Сүүлд оруулсан текстийг дахин буулгана.
+
+        Шинэ оруулга болгож санана — «давт» гэсний дараа «буцаа» гэвэл
+        зөвхөн давтсан хувь нь устана.
+        """
+        text = self.insertions.last()
+        if not text:
+            self.ui.set_detail("Давтах зүйл алга.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Давтах зүйл алга", kind="warning")
+            return
+        repeated = text * times
+        log.info("давтлаа: %d тэмдэгт", len(repeated))
+        self._deliver(repeated, 0)
+        suffix = f" ×{times}" if times > 1 else ""
+        self.ui.set_detail(f"Давтлаа{suffix}.")
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash(f"Давтлаа{suffix}")
+
+    def cycle_variant(self) -> None:
+        """Сүүлийн таналтыг танигчийн дараагийн хувилбараар солино.
+
+        Дахин ярих шаардлагагүй: танигч 3-5 хувилбар буцаадаг ба өмнө нь
+        зөвхөн эхнийхийг нь авч, үлдсэнийг хаядаг байсан.
+        """
+        state = self._variants
+        if not state:
+            self.ui.set_detail("Сэлгэх хувилбар алга.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Хувилбар алга", kind="warning")
+            return
+        items = state["items"]
+        current = items[state["index"]]
+        # Хэрэглэгч энэ хооронд өөр зүйл бичсэн бол хөндөхгүй: устгах тэмдэгтийн
+        # тоо таарахгүй тул буруу текст устана.
+        if self.insertions.last() != current:
+            self._variants = None
+            self.ui.set_detail("Текст өөрчлөгдсөн — хувилбар сэлгэсэнгүй.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Хувилбар сэлгэсэнгүй", kind="warning")
+            return
+
+        index = (state["index"] + 1) % len(items)
+        state["index"] = index
+        following = items[index]
+        self.insertions.take_last()  # хуучин оруулгыг түүхээс гаргана
+        self._deliver(following, len(current))
+        shown = following.strip()
+        log.info("хувилбар %d/%d сонголоо", index + 1, len(items))
+        self.samples.promote(state["entry"], shown)  # `replace`-ийн ӨМНӨ
+        self.transcripts.replace(state["entry"], shown)
+        self.formatter.remember(shown)
+        # Хэрэглэгч зориудаар сонгосон тул анхны хувилбарыг «буруу таньсан»
+        # гэж үзэж толинд сурна. Үргэлж ЭХНИЙХЭЭС нь сурна — хоёр дахиас
+        # гурав дахь руу шилжихэд завсрын алдаатай хос үлдэхгүй.
+        if index and self.cfg["learn_corrections"]:
+            self._learn_pair(items[0].strip(), shown)
+        self.ui.refresh_history()
+        self.ui.set_detail(f"Хувилбар {index + 1}/{len(items)}: {shown}")
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash(shown)
+
+    #: Дуут засварын нэр → хэрэглэгчид хэлэх богино тайлбар.
+    EDIT_LABELS = {
+        "drop_words": "Устгалаа",
+        "capitalize": "Том үсэг болголоо",
+        "lowercase": "Жижиг үсэг болголоо",
+        "no_space": "Зайг авлаа",
+        "replace_word": "Сольлоо",
+    }
+
+    def edit_last(self, kind: str, argument="") -> None:
+        """Сүүлийн оруулгыг дуут заавраар засна.
+
+        Засварыг ЯГ тэр оруулга дээр л хийнэ: хэрэглэгч энэ хооронд гараараа
+        бичсэн бол хөндөхгүй — эс бөгөөс буруу тооны тэмдэгт устана.
+        """
+        text = self.insertions.last()
+        if not text:
+            self.ui.set_detail("Засах текст алга.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Засах текст алга", kind="warning")
+            return
+        changed = textproc.edit_text(text, kind, str(argument or ""))
+        if changed is None or changed == text:
+            self.ui.set_detail("Засах зүйл олдсонгүй.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Засах зүйл олдсонгүй", kind="warning")
+            return
+        self.insertions.take_last()
+        self._deliver(changed, len(text))
+        # Засварласан текст нь хувилбар сэлгэхтэй зөрчилдөнө — төлвийг хаяна.
+        self._variants = None
+        label = self.EDIT_LABELS.get(kind, "Заслаа")
+        log.info("дуут засвар: %s (%d → %d тэмдэгт)", kind, len(text), len(changed))
+        self.ui.set_detail(f"{label}: {changed.strip() or '—'}")
+        if self.cfg["wave_overlay"]:
+            self.overlay.flash(label)
+
+    def copy_last(self) -> None:
+        """Сүүлийн текстийг clipboard руу хуулна (курсорт юу ч оруулахгүй)."""
+        text = self.insertions.last()
+        if not text:
+            self.ui.set_detail("Хуулах зүйл алга.")
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash("Хуулах зүйл алга", kind="warning")
+            return
+        self.copy_text(text)
+
+    def copy_text(self, text: str) -> None:
+        """Дурын текстийг clipboard руу хуулна (түүхийн мөр гэх мэт)."""
+        text = (text or "").strip()
+        if not text:
+            return
+        # Clipboard-ыг оруулалттай давхцуулахгүйн тулд ажлын thread дээр —
+        # `insert_text` нь тэр л түгжээг барьдаг тул Tk царцаж болзошгүй.
+        threading.Thread(
+            target=lambda: self._copied(injector.copy_to_clipboard(text), text),
+            daemon=True,
+        ).start()
+
+    def _copied(self, ok: bool, text: str) -> None:
+        if ok:
+            log.info("clipboard руу хууллаа: %d тэмдэгт", len(text.strip()))
+            self.events.put(("copied", len(text.strip())))
+        else:
+            log.warning("clipboard руу хуулж чадсангүй")
+            self.events.put(("error", "Clipboard завгүй байна — хуулж чадсангүй."))
 
     # ------------------------------------------------------------------
     # Удирдлага
@@ -656,14 +1217,19 @@ class MonspeechApp:
     def toggle(self) -> None:
         self.stop() if self.listening else self.start()
 
-    def start(self, lang: str | None = None) -> None:
+    def start(self, lang: str | None = None, command: bool = False) -> None:
         if self.listening:
             return
         # Товч дарсан агшны цонх бол текст очих ёстой цонх
         self.target.remember(skip=int(self.root.winfo_id()) if self.root.winfo_exists() else None)
-        # Хоёрдогч товчлуураар шууд заасан хэл нь аппын профайлаас дээгүүр —
-        # хэрэглэгч зориуд дарсан бол түүнийг нь дийлэхгүй.
+        # Үндсэн товч/асаах горим auto; хоёрдогч товч тодорхой хэл албадана.
         self._active_lang = lang or self._window_lang()
+        self._active_auto = lang is None and bool(self.cfg["detect_language"])
+        self._active_verbatim = self._window_verbatim()
+        self._active_command = command
+        if command:
+            self.ui.set_detail("Команд горим — үйлдлээ хэлнэ үү.")
+        self._active_clean = self._window_clean()
         self.recorder.max_seconds = float(self.cfg["max_recording_seconds"])
         self.recorder.segmenter.silence_hold = float(self.cfg["silence_hold"])
         error = self.recorder.start()
@@ -673,11 +1239,19 @@ class MonspeechApp:
         self.formatter.reset()
         self._last_prewarm = time.monotonic()
         self.recognizer.prewarm_async()
+        self.worker.prewarm_languages(self._active_lang, self._active_auto)
         self.listening = True
         self.tray.set_active(True)
         if self.cfg["wave_overlay"]:
             self.overlay.show()
         self._refresh_status()
+        # Сонгосон микрофоны оронд өөр төхөөрөмж нээгдсэнийг чимээгүй өнгөрөөж
+        # болохгүй — хүн ямар микрофоноор бичиж байгаагаа мэдэх ёстой
+        notice = self._mic_notice()
+        if notice:
+            self.ui.set_detail(notice)
+            if self.cfg["wave_overlay"]:
+                self.overlay.flash(notice, kind="warning")
         # Админ эрхтэй цонхонд текст чимээгүйгээр ордоггүй — урьдчилан хэлнэ
         if self.target.blocked():
             warning = "Энэ цонх админ эрхтэй байж магадгүй — текст орохгүй байж болно."
@@ -746,6 +1320,7 @@ class MonspeechApp:
         # Дүрс үнэхээр цагны хажууд байгаа эсэхийг шалгана — зөвхөн тохиргоог
         # харвал tray асаагүй байхад цонхыг нуугаад аппыг "алга болгож" мэднэ.
         if self.cfg["tray_enabled"] and self.tray.running:
+            self.ui.hide_settings()  # Тохиргооны тусдаа цонх ч хамт нуугдана
             self.root.withdraw()
         else:
             self.quit()
@@ -774,6 +1349,8 @@ def _key_label(key: str) -> str:
         "ptt_key_alt": "Хоёр дахь хэл",
         "hotkey": "Асаах/унтраах",
         "undo_key": "Буцаах",
+        "variant_key": "Хувилбар сэлгэх",
+        "command_key": "Команд горим",
     }.get(key, key)
 
 

@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from pynput.keyboard import Key, KeyCode
 
@@ -192,6 +194,63 @@ check("кирилл товчийг латинаар бичнэ", captured, ["<ct
 check("товчийн нэр", describe_key(Key.f8), "<f8>")
 check("үсгийг кодоор нь", describe_key(KeyCode(vk=90, char="з")), "z")
 check("эрэмбэ жигдрэнэ", combo_text(["<alt>", "<cmd>"]), "<cmd>+<alt>")
+
+# ----------------------------------------------------------------------
+# Хоёр дарж асаах
+# ----------------------------------------------------------------------
+def double_manager(combo="<ctrl>"):
+    taps = []
+    m = HotkeyManager(accept_injected=True)
+    m.bind_double("double", combo, lambda: taps.append("double"))
+    return m, taps
+
+
+def tap(m, key):
+    m._press(key)
+    m._release(key)
+
+
+m, taps = double_manager()
+tap(m, Key.ctrl_l)
+check("нэг дарахад юу ч болохгүй", taps, [])
+tap(m, Key.ctrl_l)
+check("хоёр дарахад ажиллана", taps, ["double"])
+
+# Гурав дарахад дахин ажиллахгүй (гинж тэглэгдсэн)
+tap(m, Key.ctrl_l)
+check("гурав дахь нь шинэ гинж", taps, ["double"])
+
+# Хослолын хэсэг байсан бол тооцохгүй: Ctrl+C
+m, taps = double_manager()
+m._press(Key.ctrl_l)
+m._press(KeyCode.from_char("c"))
+m._release(KeyCode.from_char("c"))
+m._release(Key.ctrl_l)
+tap(m, Key.ctrl_l)
+check("Ctrl+C-ийн дараа ганц дарсан нь хоёр дарах биш", taps, [])
+
+# Удаан барих нь дарж барих гэсэн үг — хоёр дарах биш
+m, taps = double_manager()
+m._press(Key.ctrl_l)
+m._doubles[0].pressed_at -= 5.0  # 5 секунд барьсан мэт
+m._release(Key.ctrl_l)
+tap(m, Key.ctrl_l)
+check("удаан барихыг тооцохгүй", taps, [])
+
+# Хугацаа хэтэрсэн бол хоёр дахь нь шинэ эхлэл
+m, taps = double_manager()
+tap(m, Key.ctrl_l)
+m._doubles[0].last_tap -= 5.0
+tap(m, Key.ctrl_l)
+check("удаашруулбал ажиллахгүй", taps, [])
+
+# `clear()` нь хоёр дарахын холбоосыг ч авна
+m, taps = double_manager()
+m.clear()
+tap(m, Key.ctrl_l)
+tap(m, Key.ctrl_l)
+check("цэвэрлэсний дараа ажиллахгүй", taps, [])
+
 
 print()
 print("FAILED" if fails else "ALL PASS")

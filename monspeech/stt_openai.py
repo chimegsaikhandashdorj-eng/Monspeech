@@ -9,14 +9,17 @@
 хэрэглэгч өөрийн үнэгүй хязгаарын түлхүүрээ хийнэ, хүсэхгүй бол Google дээрээ
 үлдэнэ.
 
-⚠️ Түлхүүр нь `config.json` дотор ил бичигдэнэ (апп нууц хадгалах сан
-ашигладаггүй). Хуваалцсан компьютер дээр үүнийг анхаарна уу.
+⚠️ Түлхүүр нь `config.json` дотор Windows DPAPI-гаар шифрлэгдэн хадгалагдана
+(санах ойд болон UI-д ил текст; файлыг нээхэд `dpapi:…` гэж харагдана).
+Хуваалцсан компьютер дээр үүнийг анхаарна уу.
 
 Google-ээс хоёр ялгаа:
   * **Хувилбар нэг** — энэ бичиглэл олон хувилбар буцаадаггүй тул толиор
     сонгох (`textproc.choose_alternative`) энд ажиллах зүйлгүй.
-  * **Итгэлцэл байхгүй** — үйлчилгээ өгдөггүй тул 1.0 буцаана. Өөрөөр хэлбэл
-    «Итгэлцлийн босго» тохиргоо энэ танигч дээр шүүлт хийхгүй.
+  * **Итгэлцэл байхгүй** — үйлчилгээ өгөхгүй бол `None` буцаана. Өөрөөр хэлбэл
+    «Итгэлцлийн босго» шүүлт хийхгүй, бас төгс итгэлцэл гэж худал үзэхгүй.
+  * **Auto хэл** — `lang="auto"` үед `language` талбарыг огт илгээхгүй;
+    multilingual model өөрөө хэлээ болон code-switch хэсгийг танина.
 """
 
 from __future__ import annotations
@@ -30,7 +33,14 @@ import uuid
 import wave
 
 from .logging_setup import get as get_logger
-from .recognizer import TIMEOUT, Provider, RecognitionError, request
+from .recognizer import (
+    TIMEOUT,
+    Provider,
+    ProviderCapabilities,
+    RecognitionError,
+    RecognitionResult,
+    request,
+)
 
 log = get_logger("stt.openai")
 
@@ -84,6 +94,11 @@ class OpenAICompatible(Provider):
 
     name = "openai"
     title = "Өөрийн үйлчилгээ (OpenAI-нийцтэй)"
+    capabilities = ProviderCapabilities(
+        auto_language=True,
+        confidence=False,
+        code_switching=True,
+    )
 
     def __init__(
         self, lang: str = "mn-MN", url: str = "", model: str = "", key: str = ""
@@ -103,19 +118,29 @@ class OpenAICompatible(Provider):
                 "Танигчийн хаяг буруу байна — «Яриа» хуудсанаас шалгана уу."
             )
         secure = parsed.scheme == "https"
+        # Localhost биш бөгөөд нууцлалгүй HTTP холболт хэрэглэж байвал анхааруулна
+        if not secure and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+            log.warning(
+                "аюулгүй бус HTTP холболтоор алсын сервер рүү хандаж байна (%s) — түлхүүр ба яриа ил сүлжээгээр дамжина",
+                parsed.hostname,
+            )
         port = parsed.port or (443 if secure else 80)
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
         return secure, parsed.hostname, port, path
 
-    def _post(self, pcm: bytes, rate: int, lang: str) -> tuple[int, bytes]:
+    def _post(self, pcm: bytes, rate: int, lang: str | None) -> tuple[int, bytes]:
         secure, host, port, path = self._target()
         body, content_type = _multipart(
             {
                 "model": self.model,
-                # ISO-639-1: «mn-MN» → «mn». Хэлээ зааж өгвөл танилт сайжирдаг.
-                "language": lang.split("-")[0],
+                # Auto үед хоосон тул `_multipart` энэ талбарыг огт илгээхгүй.
+                # Тодорхой хэл бол ISO-639-1: «mn-MN» → «mn».
+                "language": lang.split("-")[0] if lang else "",
+                # Хэрэглэгчийн толь — Whisper-төрлийн үйлчилгээ энд өгсөн үгсийг
+                # таних магадлалыг өсгөдөг. Хоосон бол `_multipart` илгээхгүй.
+                "prompt": self.vocabulary,
                 "response_format": "json",
             },
             _wav(pcm, rate),
@@ -136,15 +161,16 @@ class OpenAICompatible(Provider):
     # ------------------------------------------------------------------
     def recognize(
         self, pcm: bytes, rate: int = 16000, lang: str | None = None
-    ) -> tuple[list[str], float]:
+    ) -> RecognitionResult:
         if not pcm:
-            return [], 0.0
+            requested = "" if lang == "auto" else (lang or self.lang)
+            return RecognitionResult(language=requested, provider=self.name)
         if not self.url or not self.model:
             raise RecognitionError(
                 "Танигчийн хаяг, загвар тохируулаагүй байна — «Яриа» хуудсыг үзнэ үү."
             )
 
-        language = lang or self.lang
+        language = None if lang == "auto" else (lang or self.lang)
         with self._lock:
             body = request(
                 lambda _attempt: self._post(pcm, rate, language),
@@ -152,21 +178,34 @@ class OpenAICompatible(Provider):
                 errors=ERRORS,
             )
 
-        return self._parse(body.decode("utf-8", "replace"))
+        return self._parse(body.decode("utf-8", "replace"), language or "")
 
     @staticmethod
-    def _parse(body: str) -> tuple[list[str], float]:
+    def _parse(body: str, requested_language: str = "") -> RecognitionResult:
         """`{"text": "…"}` хэлбэрийн хариунаас текстийг авна.
 
-        Итгэлцэл ирдэггүй тул 1.0 гэж үзнэ — шүүлтгүй өнгөрнө. Хариу нь
+        Итгэлцэл ирдэггүй тул `None` — босгоор шүүхгүй. Хариу нь
         хүлээгээгүй хэлбэртэй байвал хоосон буцааж, дуудагч нь «таньсангүй»
         гэж мэдэгдэнэ (чимээгүй бүтэлгүйтэхгүй).
         """
         try:
             data = json.loads(body)
         except ValueError:
-            return [], 0.0
+            return RecognitionResult(language=requested_language, provider="openai")
         if not isinstance(data, dict):
-            return [], 0.0
+            return RecognitionResult(language=requested_language, provider="openai")
         text = str(data.get("text") or "").strip()
-        return ([text], 1.0) if text else ([], 0.0)
+        detected = str(data.get("language") or requested_language).strip()
+        # Зарим compatible сервер ISO-639-1, зарим нь бүтэн нэр буцаана.
+        detected = {
+            "mn": "mn-MN",
+            "mongolian": "mn-MN",
+            "en": "en-US",
+            "english": "en-US",
+        }.get(detected.lower(), detected)
+        return RecognitionResult(
+            [text] if text else [],
+            None,
+            detected,
+            "openai",
+        )

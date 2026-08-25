@@ -49,12 +49,28 @@ class TranscriptStore:
             pass
         self.entries = entries[-self.limit :]
 
-    def add(self, text: str, lang: str = "", seconds: float = 0.0) -> dict:
+    def add(
+        self,
+        text: str,
+        lang: str = "",
+        seconds: float = 0.0,
+        *,
+        raw_text: str = "",
+        provider: str = "",
+        confidence: float | None = None,
+        requested_lang: str = "",
+        mode: str = "polished",
+    ) -> dict:
         entry = {
             "text": text.strip(),
             "lang": lang,
             "at": datetime.now().isoformat(timespec="seconds"),
             "sec": round(seconds, 2),
+            "raw_text": raw_text.strip(),
+            "provider": provider,
+            "confidence": round(confidence, 4) if confidence is not None else None,
+            "requested_lang": requested_lang,
+            "mode": mode,
         }
         if not entry["text"]:
             return entry
@@ -106,6 +122,17 @@ class TranscriptStore:
                     break
             self._rewrite()
 
+    def set_language(self, entry: dict, language: str) -> None:
+        """Түүхийн мөрийн хэлийг хэрэглэгчийн баталсан утгаар солино."""
+
+        with self._lock:
+            for item in self.entries:
+                if item is entry:
+                    item["lang"] = language
+                    item["language_corrected"] = True
+                    break
+            self._rewrite()
+
     def clear(self) -> None:
         with self._lock:
             self.entries = []
@@ -124,6 +151,10 @@ class UsageStats:
             "seconds_spoken": 0.0,
             "recognise_ms": 0.0,
             "days": {},  # "2026-08-08": үгийн тоо
+            # Танигч тус бүрийн хэрэглээ: {"openai": {"seconds", "requests", "days"}}.
+            # Зардал тооцоход хэрэгтэй тул ТЕКСТ гарсан эсэхээс үл хамааран
+            # бүртгэнэ — юу ч танигдаагүй хүсэлт ч төлбөртэй.
+            "providers": {},
             "since": date.today().isoformat(),
         }
         self.load()
@@ -156,6 +187,40 @@ class UsageStats:
                 for key in sorted(self.data["days"])[:-90]:
                     self.data["days"].pop(key, None)
             self._dirty = True
+
+    def record_usage(self, provider: str, seconds: float) -> None:
+        """Нэг таних хүсэлтийн дууны урт. Танигчийн нэрээр нь хуримтлуулна."""
+        name = str(provider or "").strip()
+        if not name or seconds <= 0:
+            return
+        today = date.today().isoformat()
+        with self._lock:
+            slot = self.data["providers"].setdefault(
+                name, {"seconds": 0.0, "requests": 0, "days": {}}
+            )
+            slot["seconds"] = float(slot.get("seconds", 0.0)) + float(seconds)
+            slot["requests"] = int(slot.get("requests", 0)) + 1
+            days = slot.setdefault("days", {})
+            days[today] = float(days.get(today, 0.0)) + float(seconds)
+            if len(days) > 90:
+                for key in sorted(days)[:-90]:
+                    days.pop(key, None)
+            self._dirty = True
+
+    def usage(self, provider: str) -> dict:
+        """Нэг танигчийн `{seconds, requests, today, month}` (секундээр)."""
+        slot = dict(self.data["providers"].get(str(provider or ""), {}))
+        days = dict(slot.get("days", {}))
+        today = date.today().isoformat()
+        month = sum(
+            value for key, value in days.items() if key[:7] == today[:7]
+        )
+        return {
+            "seconds": float(slot.get("seconds", 0.0)),
+            "requests": int(slot.get("requests", 0)),
+            "today": float(days.get(today, 0.0)),
+            "month": float(month),
+        }
 
     def save(self, force: bool = False) -> None:
         """Хэт олон бичихээс сэргийлж 30 секунд тутам хадгална."""

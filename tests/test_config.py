@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech import config as config_module
 from monspeech.config import DEFAULTS, Config
@@ -48,6 +50,9 @@ check("type_mode_apps цэвэр хэвээр", DEFAULTS["type_mode_apps"], [])
 check("өөр хуулбарт нөлөөлөөгүй", second["snippets"], {})
 check("өөр хуулбарын жагсаалт", second["type_mode_apps"], [])
 check("орлуулга ч тусдаа", second["replacements"], {})
+check("auto хэлүүд тусдаа", second["auto_languages"], ["mn-MN", "en-US"])
+check("анхдагч auto хэл", second["detect_language"], True)
+check("анхдагч цэгцэлсэн горим", second["verbatim_mode"], False)
 
 # --- Файлаас уншсан утгууд ---
 loaded = load_with({"lang": "en-US", "silence_hold": 0.9, "mic_index": 3})
@@ -63,6 +68,7 @@ bad = load_with(
         "max_recording_seconds": -10,  # сөрөг
         "lang": 7,  # буруу төрөл
         "tray_enabled": 1,  # bool биш
+        "language_margin": 9.0,  # хүрээнээс гадуур
         "танихгүй": True,  # байхгүй түлхүүр
     }
 )
@@ -71,6 +77,7 @@ check("хэт өндөр итгэлцэл хаягдсан", bad["min_confidence
 check("сөрөг хугацаа хаягдсан", bad["max_recording_seconds"], DEFAULTS["max_recording_seconds"])
 check("буруу төрлийн хэл хаягдсан", bad["lang"], DEFAULTS["lang"])
 check("1 нь True болохгүй", bad["tray_enabled"], DEFAULTS["tray_enabled"])
+check("хэлний зай хязгаартай", bad["language_margin"], DEFAULTS["language_margin"])
 check("танихгүй түлхүүр орж ирээгүй", "танихгүй" in bad, False)
 
 # --- Бүхэл тоо ба бутархай солигдох нь зүгээр ---

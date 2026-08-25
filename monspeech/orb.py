@@ -51,7 +51,7 @@ MOUTH_STEPS = 8
 
 
 def _lerp(a, b, k):
-    return tuple(round(x + (y - x) * k) for x, y in zip(a, b))
+    return tuple(round(x + (y - x) * k) for x, y in zip(a, b, strict=True))
 
 
 def _vertical_gradient(width: int, height: int, stops) -> Image.Image:
@@ -370,7 +370,7 @@ class RobotOrb(tk.Canvas):
         self._mouth = self.create_image(
             self._at(CX, _Sprites.MOUTH_CY), image=self.sprites.mouth("idle", 0)
         )
-        for index, sign in enumerate((-1, 1)):
+        for index, _sign in enumerate((-1, 1)):
             self.itemconfigure(self._ears[index], image=self.sprites.ear_glow(3))
             self.itemconfigure(self._eyes[index], image=self.sprites.eye("idle", EYE_STEPS - 1))
 

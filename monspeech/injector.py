@@ -45,18 +45,30 @@ def insert_text(
     backspaces: int = 0,
     mode: str = "paste",
 ) -> None:
-    """Тохиргооны дагуу paste эсвэл шууд бичих аргаар оруулна."""
-    if mode == "type":
-        if backspaces:
-            with _lock:
+    """Тохиргооны дагуу paste эсвэл шууд бичих аргаар оруулна.
+
+    Түгжээг ЭНД, бүх ажлын турш барина. Устгах ба бичих хоёрыг тусад нь
+    түгжвэл хооронд нь өөр thread шургалж болно: дамжлага үр дүнгээ буулгаж
+    байх зуур хэрэглэгч «буцаа» дарвал (`app._deliver` тус бүрдээ шинэ thread
+    үүсгэдэг) устгалт нэгнийх, бичилт нөгөөгийнх болж текст эвдэрнэ.
+    """
+    with _lock:
+        if mode == "type":
+            if backspaces:
                 _backspace(backspaces)
-        type_text(text)
-    else:
-        paste_text(text, restore_clipboard, backspaces)
+            _type(text)
+        else:
+            _paste(text, restore_clipboard, backspaces)
 
 
 def paste_text(text: str, restore_clipboard: bool = True, backspaces: int = 0) -> None:
-    """Clipboard-аар дамжуулж Ctrl+V хийнэ.
+    """Clipboard-аар дамжуулж Ctrl+V хийнэ."""
+    with _lock:
+        _paste(text, restore_clipboard, backspaces)
+
+
+def _paste(text: str, restore_clipboard: bool, backspaces: int) -> None:
+    """Түгжээг дуудагч барьсан гэж үзнэ.
 
     Кирилл болон бусад Unicode тэмдэгт найдвартай ордог тул шууд
     "бичих"-ээс илүү энэ аргыг үндсэн болгосон. `backspaces` нь цэг
@@ -64,36 +76,56 @@ def paste_text(text: str, restore_clipboard: bool = True, backspaces: int = 0) -
     """
     if not text and not backspaces:
         return
+    if backspaces:
+        _backspace(backspaces)
+    if not text:
+        return
+    old = None
+    if restore_clipboard:
+        try:
+            old = pyperclip.paste()
+        except pyperclip.PyperclipException:
+            old = None
+    try:
+        pyperclip.copy(text)
+    except pyperclip.PyperclipException:
+        # Clipboard-ыг өөр програм түгжсэн бол шууд бичихийг оролдоно.
+        _keyboard.type(text)
+        return
+    time.sleep(0.03)
+    _tap(Key.ctrl, _V_KEY)
+    time.sleep(0.25)
+    if restore_clipboard and old is not None:
+        try:
+            pyperclip.copy(old)
+        except pyperclip.PyperclipException:
+            pass
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Текстийг clipboard руу хуулна. Clipboard түгжигдсэн бол `False`.
+
+    Түгжээг барина: оруулалт clipboard-ыг ашиглаад буцаан сэргээдэг тул
+    түүнтэй давхацвал хуулсан зүйл маань дарагдана.
+    """
+    if not text:
+        return False
     with _lock:
-        if backspaces:
-            _backspace(backspaces)
-        if not text:
-            return
-        old = None
-        if restore_clipboard:
-            try:
-                old = pyperclip.paste()
-            except pyperclip.PyperclipException:
-                old = None
         try:
             pyperclip.copy(text)
         except pyperclip.PyperclipException:
-            # Clipboard-ыг өөр програм түгжсэн бол шууд бичихийг оролдоно.
-            _keyboard.type(text)
-            return
-        time.sleep(0.03)
-        _tap(Key.ctrl, _V_KEY)
-        time.sleep(0.25)
-        if restore_clipboard and old is not None:
-            try:
-                pyperclip.copy(old)
-            except pyperclip.PyperclipException:
-                pass
+            return False
+    return True
 
 
 def type_text(text: str) -> None:
     """Шууд товчлуур дарж бичнэ (clipboard хөндөхгүй, гэхдээ удаан)."""
+    with _lock:
+        _type(text)
+
+
+def _type(text: str) -> None:
+    """Түгжээг дуудагч барьсан гэж үзнэ."""
     if not text:
         return
-    with _lock:
-        _keyboard.type(text)
+    _keyboard.type(text)

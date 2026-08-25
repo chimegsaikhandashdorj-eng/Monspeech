@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 from monspeech.instance import ShowListener, request_show
 
@@ -19,7 +21,7 @@ fails = []
 
 # Ажиллаж байгаа апп жинхэнэ дохиог өөртөө авдаг тул тест өөрийн нэртэй
 # объект ашиглана — апп асаалттай эсэхээс үл хамааран ижил үр дүн гарна.
-EVENT = f"Local\MonspeechTestShow_{os.getpid()}"
+EVENT = rf"Local\MonspeechTestShow_{os.getpid()}"
 
 
 def check(label, got, want):

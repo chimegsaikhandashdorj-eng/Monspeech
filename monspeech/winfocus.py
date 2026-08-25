@@ -21,6 +21,22 @@ class _GUITHREADINFO(ctypes.Structure):
     ]
 
 
+_kernel32_le = None
+
+
+def _kernel32_lasterror():
+    """`GetLastError`-ыг НАЙДВАРТАЙ уншиж болох kernel32.
+
+    `ctypes.windll.kernel32.GetLastError()` нь өөрөө бас нэг Win32 дуудлага —
+    ctypes хооронд нь өөр дуудлага хийвэл алдааны код дарагдсан байж болно.
+    `use_last_error` нь дуудлага бүрийн дараа кодыг ctypes-д хадгалуулна.
+    """
+    global _kernel32_le
+    if _kernel32_le is None:
+        _kernel32_le = ctypes.WinDLL("kernel32", use_last_error=True)
+    return _kernel32_le
+
+
 def cursor_position() -> tuple[int, int] | None:
     """Хулганы заагчийн байрлал."""
     try:
@@ -213,7 +229,7 @@ def probably_blocked(hwnd) -> bool:
         return False
     try:
         user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = _kernel32_lasterror()
         pid = wintypes.DWORD()
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
@@ -224,7 +240,7 @@ def probably_blocked(hwnd) -> bool:
         if handle:
             kernel32.CloseHandle(handle)
             return False
-        return kernel32.GetLastError() == ERROR_ACCESS_DENIED
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
     except OSError:
         return False
 
@@ -245,6 +261,10 @@ class TargetWindow:
 
     def blocked(self) -> bool:
         return probably_blocked(self.hwnd)
+
+    def known(self) -> bool:
+        """Зорилтот цонх огт тогтоогдсон эсэх."""
+        return bool(self.hwnd)
 
     def ensure(self) -> bool:
         """Текст буулгахын өмнө зорилтот цонх идэвхтэй эсэхийг батална."""

@@ -7,15 +7,19 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _console  # noqa: F401 - кирилл гаралтыг UTF-8 болгоно
+
 
 import monspeech.recognizer as recognizer_module
-from monspeech.recognizer import RecognitionError
+from monspeech.recognizer import RecognitionError, RecognitionResult
 from monspeech.stt_google import GoogleWebSpeech
 
 fails = []
 
 
 def check(label, got, want):
+    if isinstance(got, RecognitionResult):
+        got = (got.alternatives, got.confidence)
     ok = got == want
     if not ok:
         fails.append(f"{label}: got {got!r} want {want!r}")
@@ -24,7 +28,7 @@ def check(label, got, want):
 
 parse = GoogleWebSpeech._parse
 
-check("хоосон хариу", parse('{"result":[]}\n'), ([], 0.0))
+check("хоосон хариу", parse('{"result":[]}\n'), ([], None))
 check(
     "энгийн хариу",
     parse('{"result":[]}\n'
@@ -47,7 +51,7 @@ check(
 check(
     "итгэлцэл өгөөгүй бол 1.0",
     parse('{"result":[{"alternative":[{"transcript":"утга"}]}]}'),
-    (["утга"], 1.0),
+    (["утга"], None),
 )
 check(
     "хоосон transcript алгасна",
@@ -61,8 +65,8 @@ check(
           '{"transcript":""},{"transcript":"гурав"}]}]}'),
     (["нэг", "гурав"], 0.7),
 )
-check("эвдэрсэн JSON", parse("{нэг хоёр\n"), ([], 0.0))
-check("огт хоосон", parse(""), ([], 0.0))
+check("эвдэрсэн JSON", parse("{нэг хоёр\n"), ([], None))
+check("огт хоосон", parse(""), ([], None))
 
 
 # ----------------------------------------------------------------------
@@ -141,7 +145,7 @@ try:
 
     # Хоосон дуунд огт хандахгүй
     rec, calls, slept = build([200])
-    check("хоосон дуу", rec.recognize(b""), ([], 0.0))
+    check("хоосон дуу", rec.recognize(b""), ([], None))
     check("хоосон дуунд хандаагүй", len(calls), 0)
 finally:
     recognizer_module.time.sleep = real_sleep
