@@ -32,7 +32,9 @@ a = Analysis(
         # түвшингийн зам руу буцна (унахгүй, гэхдээ чанар нь хуучирна).
         "webrtcvad",
     ],
-    hookspath=[],
+    # Өөрсдийн hook-ууд contrib-ийнхийг ОРЛОНО. `hook-webrtcvad.py`-г үзнэ үү:
+    # стандарт hook нь `webrtcvad-wheels` түгээлтийн нэр дээр унадаг.
+    hookspath=[str(ROOT / "tools" / "hooks")],
     runtime_hooks=[],
     # Хэрэглэгддэггүй хүнд сангуудыг хасаж, файлын хэмжээг багасгана
     excludes=[
